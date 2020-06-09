@@ -1,0 +1,2786 @@
+---
+title: "Redefining the 5 roles in basketball"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_section : true 
+
+---
+<!-- Initialize workspace and install all packages required -->
+```{r, include=FALSE}
+rm(list=ls())
+
+# load packages
+library(BasketballAnalyzeR)
+library(data.table)
+library(ellipse)
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(plotly)
+library(RColorBrewer)
+library(corrplot)
+library(dygraphs)
+library(dplyr)
+library(knitr)
+library(formattable)
+library(kableExtra)
+library(stringr)
+
+```
+
+<!-- DEFINE ALL FUNCTIONS HERE SO WE CAN USE THEM LATER --> 
+```{r utils, include=FALSE}
+###############################################################################################################
+# twod: 2-dimensional plotting function with ggplot
+twod = function(data, data.var, w.var){
+  # creating a subsetted dataset with the axis of the plot
+  df <- data[, data.var]
+  names(df) <- c("x","y")
+  
+  # creating another subset with the variable that should serve as the color scale 
+  w <- data[, w.var]
+  # depending on the datatype of the variable, the color scale will be discrete(for characters or factors) or continous(for numeric values)
+  if (is.character(w)) {
+    w = factor(w)
+    df$w = w }
+  else if (is.factor(w) | is.numeric(w)) {
+    df$w = w}
+  
+  # plotting the values
+  p <- ggplot(data=df, aes(x=x, y=y, color=w))
+  
+  # adding the markers 
+  p <- p + geom_point()
+  
+  # adding either a discrete or continous color scale 
+  if (is.factor(w)) {
+    p = p + scale_color_manual(name=w.var, values=topo.colors(length(unique(w))))}
+  else if (!is.factor(w)){
+    p = p + scale_color_gradientn(name=w.var, colors=topo.colors(length(unique(w))))}
+  
+  # adjusting labels in the plot
+  p <- p + labs(title="", x="", y="") + theme_light()
+  return(p)
+}
+
+###############################################################################################################
+# threed: 3-dimensional plotting function with ggplot
+threed = function(data, data.var, w.var){
+  
+  # creating a subsetted dataset with the axis of the plot
+  df <- data[, data.var]
+  names(df) <- c("x","y","z")
+  
+  # creating another subset with the variable that should serve as the color scale 
+  w <- data[, w.var]
+  
+  # depending on the datatype of the variable, the color scale will be discrete(for characters or factors) or continous(for numeric values)
+  if (is.character(w)) {
+    w = factor(w)
+    df$w = w }
+  else if (is.factor(w) | is.numeric(w)) {
+    df$w = w}
+  
+  # plotting the values 
+  p = ggplot(df, aes(x=x,y=y,z=z, color=w)) +
+    axes_3D() +   # adding 3-d axes
+    stat_3D() +   # adding 3-d markers
+    theme_light() # choosing the style of the plot
+  
+  # adding either a discrete or continous color scale 
+  if (is.factor(w)) {
+    p = p + scale_color_manual(name=w.var, values=topo.colors(length(unique(w))))}
+  else if (!is.factor(w)){
+    p = p + scale_color_gradientn(name=w.var, colors=topo.colors(length(unique(w))))}
+
+  return(p)
+}
+
+
+###############################################################################################################
+# MDS: function to apply an MDS algorithm to reduce data into a k-dimensional metric space
+
+MDS <- function(data, k=2, std=TRUE ) {
+  # data must be one of the below datatypes
+  if (!is.matrix(data) & !is.data.frame(data) & (!inherits(data, "dist"))) {
+    stop("'data' must be a matrix, a data frame, or a distance matrix")
+  }
+  
+  # we need to work with a distance matrix, that is why we first standardize (if choosen to) and then transform non-distance matrix to a distance matrix
+  if (!inherits(data, "dist")) {
+    if (std) {
+      data_for_dist <- scale(data)
+    } else {
+      data_for_dist <- data
+    }
+    dist.mat <- dist(data_for_dist)
+  } else {
+    dist.mat <- data
+  }
+  
+  # we apply the non-metric MDS approach here and configure the starting configuration as the result of the metric MDS calculation (cmdscale())
+  # k is the number of dimensions we want to reduce to 
+  # the outout typically comes with the k-dimensional coordinates for every observation in the dataset and the stress index
+  out <- MASS::isoMDS(dist.mat, k, y=cmdscale(dist.mat, k), maxit=100, trace=FALSE)
+  
+  # here we add additional information to the output: 
+  # the original data
+  out[["data"]] <- data
+  # the created distance matrix
+  out[["dist"]] <- dist.mat
+  # if the values are standarized
+  out[["std"]] <- std
+  
+  class(out) <- append("MDSmap", class(out))
+  return(out)
+}
+
+###############################################################################################################
+## EventDataManipulation: Function to manipulate 'play-by-play' or 'event' data into required format for analysis 
+EventDataManipulation <- function(EventData){
+  
+  #Remove playoff games
+  data <- subset(EventData,GameType!="playoff") 
+  NameTable=tabNames
+  
+  ##create dummy shot clock, using seconds left clock
+  r=as.numeric(data$SecLeft)
+  r1=c(r[2:nrow(data)],0)
+  r2=r-r1
+  
+  #Remove end of quarter 'follow on' errors, and set columns for Play Length and Period Time
+  r2=ifelse((r2<=-690),720+r2,r2)
+  data$PlayLength=c(0,r2[1:nrow(data)-1])
+  data$PeriodTime=720-data$SecLeft
+  
+  ##merge FT and FG into a unique Shot Type, Shooter and Shot Outcome column
+  data$Shooter<-factor(paste(data$Shooter,data$FreeThrowShooter))
+  data$ShotOutcome<-paste(data$ShotOutcome,data$FreeThrowOutcome)
+  data$ShotType<-paste(data$ShotType,data$FreeThrowNum)
+  
+  ##Remove unneeded cols
+  colsDrop <- c("FreeThrowShooter","FreeThrowOutcome","FreeThrowNum","GameType","Location","Date","Time","TimeoutTeam","EnterGame","LeaveGame","JumpballAwayPlayer","JumpballHomePlayer","JumpballPoss")
+  data=data[,!(names(data) %in% colsDrop)]
+  
+  #Drop empty levels from factors
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  #Name each game
+  URLid=factor(data$URL,labels=c(1:nlevels(data$URL)))
+  data$ID=URLid
+  
+  #clean id
+  data$ID <- readr::parse_number(as.character(data$ID))
+  
+  ##Remove Team Names & White spaces from players 
+  colRemove=c("Shooter","Assister","Blocker","Fouler","Fouled","Rebounder","TurnoverPlayer","TurnoverCauser")
+  for (i in colRemove) {
+    data[,i]=removeTeam(data[,i])
+    data[,i]=whiteSpace(data[,i])
+  }
+  data$ShotOutcome <- whiteSpace(data$ShotOutcome)
+  
+  ##Redo factor levels
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  ## Convert shot type to easier format
+  data$ShotType<-factor(data$ShotType)
+  shots=levels(data$ShotType)
+  shots[str_detect(shots, " of ")] = "FT"
+  shots[str_detect(shots, "2-pt")] = "2P"
+  shots[str_detect(shots, "3-pt")] = "3P"
+  shots[str_detect(shots, "technical")] = "FT"
+  data$ShotType<-factor(data$ShotType,labels=shots)
+  
+  ## Add column to take into account points made from shot
+  r=as.character(data$ShotType)
+  r[str_detect(r, "2P")] = 2
+  r[str_detect(r, "3P")] = 3
+  r[str_detect(r, "FT")] = 1
+  made=as.character(data$ShotOutcome)
+  made[str_detect(made,"make")]=1
+  made[str_detect(made,"miss")]=0
+  points=as.numeric(r)*as.numeric(made)
+  data$points=points
+  
+  ## Add column for away/home play ticker
+  r=as.character(data$AwayPlay)
+  r=ifelse(r!="","A","H")
+  data$PlayTicker=r
+  data$PlayTeam=ifelse(as.character(data$PlayTicker)=="A",as.character(data$AwayTeam),as.character(data$HomeTeam))
+  
+  #Add difficulty probability
+  data<-ProbCalc(data)
+  
+  return(data)
+}
+
+#Function to remove any team name suffix from player name in a column 
+removeTeam <- function(dataColumn){
+  players=levels(dataColumn)
+  players=sapply(players,function(x) str_replace_all(x,"\\s-\\s\\w{3}",""))
+  r <- factor(dataColumn,labels=players)
+  r=as.character(r)
+  return(r)
+}
+
+##################################################################################################
+## Function to add probability scores to shooting events based on probability scores in book
+ProbCalc <- function(data){
+  
+  #Prob vec
+  ProbVec <- c(0.4086
+               ,0.4764
+               ,0.4678
+               ,0.5501
+               ,0.6035
+               ,0.6580
+               ,0.2939
+               ,0.3504
+               ,0.3844
+               ,0.3119
+               ,0.7481
+               ,0.7115
+  )
+  names(ProbVec)<-c(1:12)
+  
+  #Calc score diff for away & home options
+  HomeAway=ifelse(data$PlayTicker=="H",1,-1)
+  scoreDiff=(data$HomeScore-data$AwayScore)*HomeAway
+  
+  #Remove points scored on current shot for score difference calculation
+  data$sc.diff <-scoreDiff-data$points 
+  
+  ## For free throw probability, we need to calculate whether each player scored on their previous free throw
+  #  For each player/team combination, we subset and add ticker for whether the player scored their previous FT
+  
+  for (row in 1:nrow(tabNames)){
+    
+    nm=tabNames$PbP[row]
+    tm=tabNames$Team[row]
+    tabTemp<-subset(data,Shooter==nm & PlayTeam==tm & ShotType=="FT")
+    
+    ## VecPrev is the vector of 1's and 0's indication if the previous free throw was scored
+    if (nrow(tabTemp)==1){
+      
+      #Assumption; all first FT's assume previous FT was made
+      vecPrev=1
+    } else if (nrow(tabTemp)>=2) {
+      vecPrev=ifelse(tabTemp$ShotOutcome=="make",1,0)
+      
+      vecPrev=c(1,vecPrev[1:(length(vecPrev)-1)])
+      
+    }
+    
+    data$prev_ft[(data$Shooter==nm & data$PlayTeam==tm & data$ShotType=="FT")]=vecPrev
+  }
+  
+  #Create only shooting table
+  tabTemp=subset(data,Shooter!="")
+  
+  #create empty vector that we will assign shot difficulty to
+  vecDifficulty=c(1:nrow(tabTemp))
+  
+  #VecOutcome is the vector that gives 1 if shot was made, 0 if missed
+  vecOutcome=ifelse(tabTemp$points>=1,1,0)
+  
+  #Loop through all shots and assign difficulty to each
+  for (row in 1:nrow(tabTemp)){
+    shot_type=as.character(tabTemp$ShotType[row])
+    score_diff=as.numeric(tabTemp$sc.diff[row])
+    prev_ft=as.numeric(tabTemp$prev_ft[row])
+    shot_clock=25-as.numeric(tabTemp$PlayLength[row])
+    quarter_time=as.numeric(tabTemp$SecLeft[row]) 
+    Index=sortIndex(shot_type,prev_ft,shot_clock,quarter_time,score_diff)
+    vecDifficulty[row]=ProbVec[[Index]]
+  } 
+  
+  #difficulty is the shot difficulty, score_diff is the actual score given to each shot, taking into account difficulty
+  data$difficulty[(data$Shooter!="")]=vecDifficulty
+  data$score_diff[(data$Shooter!="")]=vecOutcome-vecDifficulty  
+  
+  return(data)
+  
+}
+
+
+#################################################################################################################################
+## Function to remove white space in columns
+whiteSpace <- function(dataColumn){
+  dataColumn=as.character(dataColumn)
+  dataColumn=trimws(dataColumn,which = c("both"))
+  return (dataColumn)
+}
+
+################################################################################################################################
+## Function to sort a shot by a specification into its correct category, specified by index. Assume made in original 24 sec clock
+sortIndex <- function(shot_type,prev_ft,shot_clock,quarter_time,score_diff,poss_type=TRUE){
+  
+  
+  if (shot_type=="2P"){
+    if (shot_clock<=2){
+      #time end
+      index=1
+    } else if (shot_clock>2 & shot_clock<=10){
+      #middle end
+      index=2
+      
+    } else if (shot_clock>10 & shot_clock<=17){
+      #Early middle
+      if (poss_type) {
+        #made in original 24 secs
+        if (score_diff<=-15){
+          #if score difference less than -15
+          index=3
+        } else {
+          index=4
+        }
+        
+      } else {
+        #made in second 14-secs restart
+        index=5
+      }
+      
+      
+    } else {
+      #early
+      index=6
+    }
+  } else if (shot_type=="3P"){
+    if (shot_clock<=2){
+      #time end
+      index=7
+    } else {
+      if (quarter_time>=100) {
+        if (shot_clock>2 & shot_clock<=10) {
+          index=8
+        } else {
+          index=9
+        }
+      } else {
+        index=10
+      }
+    }
+    
+  } else {
+    #Free throws
+    
+    if (prev_ft==1) {
+      #made previous free throw
+      index=11
+    } else {
+      #didn't make previous free throw
+      index=12
+    }
+  }
+  
+  return(index)
+  
+}
+
+
+#########################################################################################################
+## Function to combine the player data and Bio data, and reformulate to a readable and replicable format 
+PlayerManipulation <- function(PlayerData,BioData){
+  
+  # Remove empty rows
+  data<-subset(PlayerData,Player!="")
+  
+  # Convert names of players
+  plyer=as.character(data$Player)
+  
+  # encode special characters
+  Encoding(plyer) <- "UTF-8"
+  
+  # remove ids
+  plyer=str_replace_all(plyer,"\\\\.+","")
+  
+  # Remove special characters
+  plyer=iconv(plyer, from = 'UTF-8', to = 'ASCII//TRANSLIT')
+  
+  # Remove all name additions to ensure we can match with event data
+  plyer=str_replace(plyer," Jr.","")
+  plyer=str_replace(plyer," Sr.","")
+  plyer=str_replace(plyer," III","")
+  plyer=str_replace(plyer," II","")
+  plyer=str_replace(plyer," IV","")
+  
+  data$Player=plyer
+  
+  # Remove Total rows
+  data<-subset(data,Tm!="TOT")
+  
+  ## Drop empty levels from factors
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  #Assign transformed player data to variable PlayerDataNew. We will use this to merge later
+  PlayerDataNew=data
+  
+  ## Now manipulate Bio Dataset and merge with Pbox
+  
+  #Remove any empty rows
+  data<-subset(BioData,Player!="")
+  
+  #Convert height from ft and inches to cm  
+  data$height_cm=(as.numeric(data$Height_ft)*30.48)+(as.numeric(data$Height_in)*2.54)
+  
+  #Convert names of players
+  plyer=as.character(data$Player)
+  
+  #encode special characters
+  Encoding(plyer) <- "UTF-8"
+  plyer=iconv(plyer, from = 'UTF-8', to = 'ASCII//TRANSLIT')
+  plyer=str_replace(plyer," Jr.","")
+  plyer=str_replace(plyer," Sr.","")
+  plyer=str_replace(plyer," III","")
+  plyer=str_replace(plyer," II","")
+  plyer=str_replace(plyer," IV","")
+  
+  data$Player=plyer
+  
+  ##Add Col for Pbox Naming Convention to merge
+  data$Pbox_names=tabNames$Pbox[match(data$Player,tabNames$Bio)]
+  
+  #Merge Player Data with Bio data
+  PlayerDataNew=merge(PlayerDataNew,data,by.x = "Player",by.y = "Pbox_names",all.x = TRUE)
+  
+  #Set new column names to ensure usability by any user
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FG."))] <- c("FGp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FG"))] <- c("FGM")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3P"))] <- c("P3M")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3PA"))] <- c("P3A")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3P."))] <- c("P3p")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2P"))] <- c("P2M")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2PA"))] <- c("P2A")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2P."))] <- c("P2p")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("eFG."))] <- c("EFGp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FT."))] <- c("FTp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("MP"))] <- c("MIN")
+  
+  #Remove added teams and names from bio. Unneeded
+  colsDrop <- c("Player.y","Team","Age.y")
+  PlayerDataNew=PlayerDataNew[,!(names(PlayerDataNew) %in% colsDrop)]
+  
+  return(PlayerDataNew)
+}
+####################################################################################################
+## Function to calculate rebounds count for each team so we can take team percentages for each player
+sumTeam <- function(data,PlyrData){
+  
+  ## First assume that player is at home
+  
+  #Create RB marker
+  data$RB = (ifelse (data$ReboundType=="" ,NaN, 
+                     ifelse(data$ReboundType=="defensive",
+                            ifelse(data$PlayTicker=="H", 1,2),
+                            ifelse(data$PlayTicker=="H",3,4))))
+  
+  # 1: Home DRB
+  # 2: Away DRB
+  # 3: Home ORB
+  # 4: Away ORB
+  
+  #Create unique list of teams
+  dfH=data.frame(unique(data$PlayTeam))
+  
+  #Set home team
+  colnames(dfH)[1]<-'HomeTeam'
+  
+  #For each type of rebound, we sum for each team
+  for (r in c(1:4)){
+    d = data %>%
+      dplyr::filter(Rebounder!="",RB==r) %>%
+      dplyr::group_by(HomeTeam) %>%
+      dplyr::summarise(count = n()) 
+    dfH=merge(dfH,d,by.x ="HomeTeam",by.y = "HomeTeam" )
+    colnames(dfH)[r+1]=(as.numeric(r))
+  }
+  
+  #Sort by alphabetical order
+  dfH=dfH[order(dfH$HomeTeam),]
+  
+  #Switch for away teams so we can still collect 1's, 2's etc for total rebounds.
+  
+  #Create RB marker
+  data$RB = (ifelse (data$ReboundType=="" ,NaN, 
+                     ifelse(data$ReboundType=="defensive",
+                            ifelse(data$PlayTicker=="A", 1,2),
+                            ifelse(data$PlayTicker=="A",3,4))))
+  
+  # 1: Away DRB
+  # 2: Home DRB
+  # 3: Away ORB
+  # 4: Home ORB
+  
+  dfA=data.frame(unique(data$PlayTeam))
+  colnames(dfA)[1]<-'AwayTeam'
+  for (r in c(1:4)){
+    d = data %>%
+      dplyr::filter(Rebounder!="",RB==r) %>%
+      dplyr::group_by(AwayTeam) %>%
+      dplyr::summarise(count = n()) 
+    dfA=merge(dfA,d,by.x ="AwayTeam",by.y = "AwayTeam" )
+    colnames(dfA)[r+1]=(as.numeric(r))
+  }
+  dfA=dfA[order(dfA$AwayTeam),]
+  
+  
+  #Collect all rebounds into data frame for each team, then add to Pbox data
+  Rebounds=data.frame(dfH$HomeTeam,(dfH$`1`)+(dfA$`1`),(dfH$`2`)+(dfA$`2`),(dfH$`3`)+(dfA$`3`),(dfH$`4`)+(dfA$`4`))
+  
+  colnames(Rebounds)=c("Team","TDRB","ODRB","TORB","OORB")
+  
+  # creating team variables that are later used for the creation of variables
+  t=PlyrData %>%
+    dplyr::group_by(Tm) %>%
+    dplyr::summarise(TMIN=sum(MIN),TP3M=sum(P3M),TP3A=sum(P3A),TP2M=sum(P2M),TP2A=sum(P2A),
+                     TFT=sum(FT),TFTA=sum(FTA),TFGM=sum(FGM), TFGA = sum(FGA), TTOV = sum(TOV))
+  
+  PlyrData=merge(PlyrData,Rebounds,by.x = 'Tm',by.y = 'Team')
+  
+  PlyrData=merge(PlyrData,t,by.x = 'Tm',by.y = 'Tm')
+  
+  
+  return(PlyrData) 
+}
+
+#Function to run after all manipulation to remove variables unneeded for remainder of analysis
+CleanData <- function(PlayerData){
+  colsRemove=c("ï..Rk","Age.x",'GS','EFGp',"Height_ft","Height_in",'FGPTS','FGPTS_AST','FGPTS_ASTp','ASTPTS','TOTMins','Weighting',"TRB")
+  PlayerDataNew=PlayerData[,!(names(PlayerData) %in% colsRemove)]
+  return(PlayerDataNew)
+}
+
+################################################################################################################
+
+assistnet <- function(data, Assister="Assister", Shooter="Shooter", points="points", ShotOutcome="ShotOutcome") 
+{
+  # creating a new data frame
+  data = droplevels.data.frame(data)
+  
+  # filter all assisted shots and return a dataframe of Assisters and Shooters
+  assist_player = subset(data, Assister!="", select=c(Assister,Shooter))
+  assist_player = droplevels.data.frame(assist_player)
+  
+  # gives a sorted list of all the assisting players
+  all_ast_plr = sort(unique(unlist(assist_player)))
+  
+  # factorizing all players in order to obtain a square matrix 
+  assist_player$Assister = factor(assist_player$Assister, levels=all_ast_plr)
+  assist_player$Shooter  = factor(assist_player$Shooter,  levels=all_ast_plr)
+  
+  # employ a pxp matrix that serves as an adjacency matrix for the network visualization
+  tbl = as.matrix(table(assist_player, useNA="no"))
+  if (nrow(tbl)!=ncol(tbl)) {
+    stop("The number of players in 'assist' and 'player' variables are not the same.")
+  }
+  
+  # create shooter statistics
+  nodeData1 = data %>%
+    dplyr::group_by(Shooter) %>%
+    
+    # filter out the rows that describes a shot 
+    dplyr::filter(ShotOutcome=="make") %>% 
+    dplyr::summarise(FGM=dplyr::n(),
+                     FGM_AST=sum(Assister!=""),
+                     FGM_ASTp=100*FGM_AST/FGM,
+                     FGPTS=sum(points),
+                     FGPTS_AST=sum(points*(Assister!="")), # 
+                     FGPTS_ASTp=100*FGPTS_AST/FGPTS) %>%
+    as.data.frame()
+  
+  # create assister statistics
+  nodeData2 = data %>%
+    # filter out all shots that have been assisted
+    dplyr::filter(Assister!="") %>%
+    dplyr::group_by(Assister) %>%
+    dplyr::summarise(AST=dplyr::n(), ASTPTS=sum(points)) %>%
+    as.data.frame()
+  
+  # merge together the measures we obtained for shooters and assisters
+  nodeData <- merge(nodeData1, nodeData2, by.x="Shooter", by.y="Assister", all=T)
+  
+  # create a network with directed edges out of the pxp adjacency matrix
+  net <- network::network(tbl, matrix.type="adjacency", directed=TRUE,
+                          ignore.eval=FALSE,  names.eval="N")
+  
+  # aggregate all results that are desired to be outputted
+  out = list(assistTable=tbl, nodeStats=nodeData, assistNet=net)
+  class(out) <- append("assistnet", class(out))
+  return(out)
+}
+
+################################################################################################################
+# AssistStats for every player 
+
+assistStat = function(df, PlayTeam="PlayTeam", Assister="Assister", Shooter="Shooter", points="points", ShotOutcome="ShotOutcome"){
+  
+  # creating a new data frame
+  final = data.frame()
+  
+  # loop through all teams to obtain these statistics for all players 
+  for (team in unique(df[[PlayTeam]])){
+    
+    data = subset(df, PlayTeam==team)
+    data = droplevels.data.frame(data)
+    
+    # create shooter statistics
+    nodeData1 <- data %>%
+      dplyr::group_by(Shooter) %>%
+      
+      # filter out the rows that describes a shot 
+      dplyr::filter(ShotOutcome=="make") %>% 
+      dplyr::summarise(FGM=dplyr::n(),
+                       FGM_AST=sum(Assister!=""),
+                       FGM_ASTp=100*FGM_AST/FGM,
+                       FGPTS=sum(points),
+                       FGPTS_AST=sum(points*(Assister!="")), # 
+                       FGPTS_ASTp=100*FGPTS_AST/FGPTS) %>%
+      as.data.frame()
+
+    
+    # create assister statistics
+    nodeData2 <- data %>%
+      # filter out all shots that have been assisted
+      dplyr::filter(Assister!="") %>%
+      dplyr::group_by(Assister) %>%
+      dplyr::summarise(AST=dplyr::n(), ASTPTS=sum(points)) %>%
+      as.data.frame()
+    
+    # merge together the measures we obtained for shooters and assisters
+    nodeData = merge(nodeData1, nodeData2, by.x="Shooter", by.y="Assister")
+    
+    # additionally assign the team to the newly created player statistics to make the rows identifiable, since one player can be in more than one team 
+    nodeData$Team = team
+    
+    # add the statistics for all players within one team to the final data frame 
+    final    = rbind(final, nodeData) }
+  
+  # after looping through every team, the output will be a list of all the players and the teams they played in with their respective statistics
+  return(final)
+}
+
+
+############################################################################################
+#Adapted the density plot function from book for our use 
+#Only need to show analysis by period time, so strip out the rest of the code
+period_densityplot <- function(data, shot.type="field", thresholds=NULL, best.scorer=FALSE,
+                               period.length=12, bw=NULL, title=NULL) {
+  
+  if (is.null(bw)) {
+    bw <- "nrd0"
+  }
+  
+  #Only interested in Field Goals
+  mat <- subset(data, ShotType=="2P" | ShotType=="3P")
+  mat <- droplev_by_col(mat)
+  
+  var="PeriodTime"
+  x <- mat[,var]
+  #Give range for period times
+  xrng <- c(0, period.length*60)
+  
+  #Return density structure, giving smooth curve approximation to shots by players at certain time periods 
+  den <- stats::density(x, bw=bw, from=xrng[1], to=xrng[2])
+  den <- as.data.frame(den[c("x", "y")])
+  
+  
+  #Give thresholds for the different percentages
+  if (is.null(thresholds)) {
+    thr <- period.length*60*c(1/3,2/3)
+  } else {
+    thr <- thresholds
+  }
+  
+  
+  p <- plot_shotdensity(mat, den, var=var, thr=thr, xrng=xrng, ntks=10, title=title,
+                        xadj=c(0,0,period.length*60), yadj=c(2,2,2,10), best.scorer=best.scorer, xlab="Period time")
+  
+  p <- p + theme_bw()
+  
+  return(p)
+}
+
+#Function to build the shot density plot, adapted from book
+plot_shotdensity <- function(mat, den, var, thr, xrng, ntks, xadj, yadj, title=NULL, best.scorer=FALSE, xlab=NULL) {
+  
+  droplev_by_col <- function(data) {
+    idx <- sapply(data, class)=="factor"
+    data[, idx] <- lapply(data[, idx], droplevels)
+    return(data)
+  }
+  
+  y <- NULL
+  x <- mat[, var]
+  n <- nrow(mat)
+  m1 <- droplev_by_col(mat[x <= thr[1], ])
+  n1 <- nrow(m1)
+  p1 <- round(n1/n*100,0)
+  m1p <- round(sum(m1$ShotOutcome=="make")/n1*100,0)
+  m2 <- droplev_by_col(mat[x <= thr[2] & x > thr[1], ])
+  n2 <- nrow(m2)
+  p2 <- round(n2/n*100,0)
+  m2p <- round(sum(m2$ShotOutcome=="make")/n2*100,0)
+  m3 <- droplev_by_col(mat[x > thr[2], ])
+  n3 <- n - (n1+n2)
+  p3 <- 100-(p1+p2)
+  m3p <- round(sum(m3$ShotOutcome=="make")/n3*100,0)
+  
+  x1 <- (thr[1] + xadj[1])/2
+  x2 <- (thr[1] + thr[2] + xadj[2])/2
+  x3 <- (thr[2] + xadj[3])/2
+  
+  y1 <- mean(den$y[den$x<(x1 + yadj[4]) & den$x>(x1 - yadj[4])])/yadj[1]
+  y2 <- mean(den$y[den$x<(x2 + yadj[4]) & den$x>(x2 - yadj[4])])/yadj[2]
+  y3 <- mean(den$y[den$x<(x3 + yadj[4]) & den$x>(x3 - yadj[4])])/yadj[3]
+  
+  p <- ggplot(den,aes(x,y))+
+    geom_line(col='gray',lwd=2) +
+    geom_ribbon(data=subset(den,x<=thr[1]),aes(x=x, ymax=y, ymin=0), fill="blue", alpha=0.3) +
+    geom_ribbon(data=subset(den,x<=thr[2] & x>thr[1]),aes(x=x, ymax=y, ymin=0), fill="blue", alpha=0.5) +
+    geom_ribbon(data=subset(den,x>thr[2]),aes(x=x, ymax=y, ymin=0), fill="red", alpha=0.3) +
+    annotate("text", label = paste(as.character(p1),"%",sep=""), x = x1, y = y1, size = 5, colour = "blue") +
+    annotate("text", label = as.character(n1), x = x1, y = y1, size = 4, colour = "blue",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m1p),"% made)",sep=""), x = x1, y = y1, size = 4, colour = "blue",vjust = 4) +
+    annotate("text", label = paste(as.character(p2),"%",sep=""), x = x2, y = y2, size = 5, colour = "blue") +
+    annotate("text", label = as.character(n2), x = x2, y = y2, size = 4, colour = "blue",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m2p),"% made)",sep=""), x = x2, y = y2, size = 4, colour = "blue",vjust = 4) +
+    annotate("text", label = paste(as.character(p3),"%",sep=""), x = x3, y = y3, size = 5, colour = "red") +
+    annotate("text", label = as.character(n3), x = x3, y = y3, size = 4, colour = "red",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m3p),"% made)",sep=""), x = x3, y = y3, size = 4, colour = "red",vjust = 4) +
+    labs(title = title) +
+    scale_x_continuous(name=xlab, limits=c(xrng[1], xrng[2]), breaks=seq(xrng[1],xrng[2],length.out=ntks),
+                       labels=seq(xrng[1],xrng[2],length.out=ntks)) +
+    scale_y_continuous(name="Frequency of shots", limits=c(0, NA),labels=NULL)
+  
+  return(p)
+}
+
+
+droplev_by_col <- function(data) {
+  idx <- sapply(data, class)=="factor"
+  data[, idx] <- lapply(data[, idx], droplevels)
+  return(data)
+}
+##### VariableSelect ####################################
+##### Input #####
+# PlayerData = Pbox season data on which to cluster
+# k = Number of clusters
+
+##### Output #####
+# VarCluster = Variables to cluster on
+
+#Used RAFTERY and DEAN (2006)
+
+VariableSelect <- function(PlayerData,minK=2,k,algorithm="Hartigan-Wong",nStarts=1,printFull=FALSE){
+  
+  
+  PlayerData = scale(PlayerData)
+  PlayerData[is.na(PlayerData)]=0
+  #Give data frame of numeric/integer values, scale data firstly
+  
+  #Extract PlayerData into matrix form
+  matData=as.matrix.data.frame(PlayerData)
+  
+  varN=ncol(PlayerData)
+  var_exc=c(1:varN)
+  
+  maxBICY1=-10000000
+  #1/ Find first variable to select as one with highest univariate clustering potential
+  for (i in var_exc){
+    for (j in c(minK:k)){
+      kmeans_i=kmeans(matData[,i],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+      bic_i=bic_kmeans(kmeans_i,matData[,i])
+      if (maxBICY1<bic_i){
+        maxBICY1=bic_i
+        maxVar=i
+        maxClust=j
+      }  
+    }
+  }
+  
+  if (printFull) {
+  print("Step 1:")
+  print(paste("BIC = ",maxBICY1,sep = ""))
+  print(paste("Optimal no of clusters = ",maxClust))
+  print(paste("Best univariate variable = ", colnames(PlayerData)[maxVar]))
+  }
+  
+  #Create list of variables 
+  var_inc=c(maxVar)
+  var_exc=var_exc[!(var_exc==maxVar)]
+  
+  #2/ Find second variable, take best bivariate clustering potential with first variable
+  maxBICdiff=-10000000
+  for (i in var_exc){
+    for (j in c(minK:k)){
+      
+      #Calc regression BIC
+      y1=matData[,c(var_inc)]
+      y2=matData[,i]
+      ft=lm(y2~y1)
+      rss=sum((ft$residuals)^2)  
+      n=dim(matData)[1]
+      bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+      
+      kmeans_i=kmeans(matData[,c(var_inc,i)],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+      bic_clust=bic_kmeans(kmeans_i,matData[,c(var_inc,i)])
+      
+      bic_notClust=bic_reg+maxBICY1  
+      
+      bic_diff=bic_clust-bic_notClust
+      
+      if (maxBICdiff<bic_diff){
+        maxBICdiff=bic_diff
+        maxBIC=bic_clust
+        maxVar=i
+        maxClust=j
+      } 
+    }
+  }
+  
+  #Create list of variables 
+  var_inc=c(var_inc,maxVar)
+  var_exc=var_exc[!(var_exc==maxVar)]
+  
+  #Set new model BIC
+  maxBICY1=maxBIC
+  
+  if (printFull) {
+  print("")
+  print("Step 2:")
+  print(paste("BIC = ",maxBICY1,sep = ""))
+  print(paste("Optimal no of clusters (bivariate) = ",maxClust))
+  print(paste("Best Bivariate variables = ", colnames(PlayerData)[var_inc[1]]," & ",colnames(PlayerData)[var_inc[2]]))
+  }
+  #Run algorithm
+  # while true
+  done=FALSE
+  
+  while (!done){
+    
+    #3/ Find variable with most multivariate clustering potential with those already selected
+    maxBICdiff=-10000000
+    for (i in var_exc){
+      for (j in c(minK:k)){
+        
+        #Calc regression BIC
+        y1=matData[,c(var_inc)]
+        y2=matData[,i]
+        ft=lm(y2~y1)
+        rss=sum((ft$residuals)^2)  
+        n=dim(matData)[1]
+        bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+        
+        kmeans_i=kmeans(matData[,c(var_inc,i)],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+        bic_clust=bic_kmeans(kmeans_i,matData[,c(var_inc,i)])
+        
+        bic_notClust=bic_reg+maxBICY1  
+        
+        bic_diff=bic_clust-bic_notClust
+        
+        if (maxBICdiff<bic_diff){
+          maxBICdiff=bic_diff
+          maxBIC=bic_clust
+          maxVar=i
+          maxClust=j
+        } 
+      }
+    }
+    
+    #If diff in BIC vals is positive, add variable maxVar
+    if ((maxBICdiff)>0){
+      var_inc=c(var_inc,maxVar)
+      var_exc=var_exc[!(var_exc==maxVar)] 
+      #update current Y1 bic
+      maxBICY1=maxBIC
+    } else {
+      done=TRUE
+      
+    }
+    
+    if (printFull) {
+    print("")
+    print("Step 3:")
+    print(paste("BIC = ",maxBICY1,sep = ""))
+    print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+    print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+    }
+    #4/ Find variable for removal from currently selected variables by finding variable with weakest evidence for clustering inclusion
+    #   and remove if evidence for not clustering is higher than clustering
+    
+    minBICdiff=10000000
+    for (i in var_inc){
+      for (j in c(minK:k)){
+        tempCol=var_inc[!(var_inc==i)]
+        
+        #Calc regression BIC
+        y1=matData[,tempCol]
+        y2=matData[,i]
+        ft=lm(y2~y1)
+        rss=sum((ft$residuals)^2)  
+        n=dim(matData)[1]
+        bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+        
+        kmeans_i=kmeans(matData[,tempCol],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+        bic_clust=bic_kmeans(kmeans_i,matData[,tempCol])
+        
+        bic_notClust=bic_reg+bic_clust
+        
+        bic_diff=maxBICY1-bic_notClust
+        
+        if (minBICdiff>bic_diff){
+          minBICdiff=bic_diff
+          minBIC=bic_clust
+          minVar=i
+          minClust=j
+        } 
+      }
+    }
+    
+    #If diff in BIC vals is ngative, remove minVar
+    if ((minBICdiff)<=0){
+      var_inc=var_inc[!(var_inc==minVar)]
+      var_exc=c(var_exc,minVar) 
+      var_exc=sort(var_exc)
+      done=FALSE
+      
+      if (printFull) {
+      print("")
+      print("Step 4:")
+      print(paste("BIC = ",maxBICY1,sep = ""))
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print(paste("remove: ",colnames(PlayerData)[minVar]))
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+      }
+      
+    } else {
+      
+      if (printFull) {
+      print("")
+      print("Step 4:")
+      print(paste("BIC = ",maxBICY1,sep = ""))
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print("Do not remove variable")
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+      }
+    }
+    
+  }
+  
+  if(!printFull){
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+  }
+  return(var_inc)
+}
+
+
+bic_kmeans <- function(kmeans,x){
+  #    Function to estimate the BIC metric, for output of k-means algorithm
+  #   - Estimates clusters to have gaussian mixture distribution, in order to calculate likelihood
+  
+  #  Parameters:
+  ##########################################
+  # kmeans:  data frame with output of kmeans algorithm
+  
+  # X     :  Data points
+  ##########################################
+  # assign centers and labels
+  centers = kmeans$centers
+  labels  = kmeans$cluster
+  #number of clusters
+  K = as.numeric(dim(centers)[1])
+  # size of the clusters
+  Rn = kmeans$size
+  #R = number of data points, M=number of variables (dim)
+  R = as.numeric(dim(as.matrix(x))[1])
+  M = as.numeric(dim(as.matrix(x))[2])
+  
+  #Compute Variance
+  cl_var = (1.0 / ((R - K)*M)) * (kmeans$tot.withinss)
+  
+  const_term = K * log(R)*(M+1)
+  
+  ll=sum(Rn*log(Rn))-R*log(R)-(R*M*0.5*log(2*pi*cl_var))-(0.5*M*(R-K))
+  
+  BIC = 2*ll - const_term
+  
+  return(BIC)
+  
+}
+
+```
+
+# Introduction
+The goal of this project is to redefine player roles of basketball players using clustering - similarly as Alagappan (2012), a paper which is one of the first quantative analysis attempting to characterize the playing roles of basketball players.
+
+We employed a kmeans algorithm while investigating multiple ways to make the clustering output more insightful: Firstly, we explored developing a more extensive set of statistical variables that measure player performance in various skills of the game. As an example, we look in depth at introducing a score from -1 to 1, indicating how well a player performs under certain pressured situations. Secondly, we make use of a visualization tool to understand the clusters better, namely Multi-Dimensional Scaling, an algorithm aimed at presenting similarities between players over multiple dimensions. Thirdly, we attempt to build a variable selection algorithm. Over the course of the analysis, we encounter approximately 45 different variables, and the variable selection algorithm aims to select those variables that have explanatory power whilst removing variables with insignificant noise, or collinearity with other variables, therefore increasing the risk of overfitting in the dataset. 
+
+# Data Manipulation
+## Data Cleaning
+With the objective to recreate the clustering that Muthu Alagappan employed, we merged information from three main datasets: play-by-play data, player statistics and biodata (including height and weights of the players, added to imitate the data preperation work that Alagappan performed). As a first step, we transformed the play-by-play data by trimming white spaces and merging columns to have more compact information. As described later, we then created several variables out of the relational data (difficulty score, FGM_ASTp etc). 
+After creating variables out of play-by-play data, we have created a naming table to move between datasets, as each source has different naming conventions. 
+
+
+```{r,include=TRUE}
+  #Download data
+  EventData <- read.csv("PbP.csv")
+  PlayerData <- read.csv("Pbox.csv")
+  BioData <- read.csv("BioStats.csv")
+```
+
+```{r,include=FALSE}
+  colnames(BioData)[1]<-'Player'
+  
+  #Name Conversion Table
+  tabNames<- read.csv("NamingTable 2018-19.csv")
+  colnames(tabNames)<-c('Pbox','Bio','PbP','Team')
+  
+  #No need for factors in naming conversion table
+  tabNames[,] <- lapply(tabNames, function(x) type.convert(as.character(x), as.is = TRUE))
+```
+    
+For an illustration of the need to combine tables and the difficulty related to naming conventions here, one can look at a few examples: 
+
+```{r,echo=FALSE}
+tb=subset(tabNames[,1:3],(Pbox=="T.J. Leaf" | Pbox=="Wesley Iwundu"))
+kable(tb,escape=F,col.names=c("Player Stats Name","Bio Stats Name","Event-by-Event Name"),row.names=FALSE) %>%
+kable_styling("striped",full_width = F) 
+```
+    
+Once downloaded, we move onto the data manipulating functions we have written. These take the raw datasets as input, and return two clean datasets. We run two functions here, namely **EventDataManipulation()** and **PlayerManipulation()**, which are listed and throroughly commented in the attached appendix. 
+`Note: Running the **EventDataManipulation()** may take a few minutes, due to the size of the input dataset (600,000 observation with 40 variables)`
+
+```{r, include=TRUE}  
+  #Manipulate data
+  PbP <- EventDataManipulation(EventData)
+  Pbox <- PlayerManipulation(PlayerData,BioData)
+```
+
+```{r, include=FALSE}
+  #Remove raw datasets that are no longer needed 
+  rm(BioData,EventData,PlayerData)
+```
+
+## PbP - Aggregration by team
+In order to calculate variables and some of their approximations, we need to first sum occurrences of selected variables by team. For example, if we wish to attribute the percentage of a team's offensive rebounds to a certain player, we must first count all the team rebounds for that particular team using the PbP data. 
+
+```{r, include=TRUE}
+  #sumTeam counts occurrences of shooting and rebound stats by team, and adds to Player data
+  Pbox=sumTeam(PbP,Pbox)
+```
+A description of the function "sumTeam" can be found in the appendix.
+
+# Basketball Variables
+Aiming to measure different skills of players in the game, we aimed to use an extensive and differentiated set of player performance variables. We started with the common variables that usually refer to team performance in the Four-Factor Model and calculated them on the player-level. Those variables are ‘__Turnovers per possession__' (TPP), ‘__Offensive rebound percentage__‘ (ORp) and ‘__Free throw percentage__’ (FTp). Due to the similarity of calculation between ORp and '__Defensive Rebound percentage__' (DRp), we include DRp in our analysis. We also included '__2-point percentage__' (P2p) and '__3-point percentage__' (P3p) to measure a player's shooting ability. We distinguished between 2-pointers and 3-pointers as we found they measure two separate skills: to score a field goal from short-distance and the skill to score from long range. Extending our focus on shooting abilitiy, we introduced a new variable accounting for the difficulty of a shot (diff).
+
+In addition to the above variables, we researched further performance indicators for offensive and defensive skills that are commonly reported in basketball statistics. The first offensive variable is ‘__Usage percentage__’ (USGp). It states the percentage of team plays that a player was involved in while he was on the pitch, provided they end in one of the three results: field-goal attempt, free-throw attempt or turnover. In other words, it measures how well a player connects with his teammates on the pitch. A further offensive variable is ‘__Assist percentage__’ (ASTp), which states the share of field goals for his team that a player assisted. While the most basic statistic used to measure a player's passing ability is the total number of assists, ASTp is commonly known to be a the more precise measure. 
+When it comes to defensive variables, we used ‘__Blocks per game__’ (BLKg) and ‘__Steals per game__’ (STLg). They measure the ability to block opponents' shots or steal the ball from opposing players dribbling with the ball, respectively.
+
+Leveraging the relational data in terms of the play-by-play dataset and the tools that were given by the book, we observed significant differences not only by how many assist a player makes, but also by how many he receives from other players. Hence, we identifed '__Assisted Field Goals Made percentage__' (FGM_ASTp) as a potential differentiation between players and added it to our variables.
+
+## Rebound Variables
+To have a confirmation of the correctness of our data, we made use of the fact that ORp can be calculated in two ways: 
+
+* $ORp1 = 100*\left(\frac{TMIN/5}{MIN}\right)*\left(\frac{ORB}{(TP2A-TP2M)+(TP3A-TP3M)+(TFTA-TFT)}\right)$ 
+* $ORp2 = 100*\left(\frac{ORB*TMIN/5}{MIN*(TORB+ODRB)}\right)$
+
+ORp1 takes into account all rebound opportunities after a missed shot of the team. The term $((TMIN)/5)/MIN$ is a scaling parameter that approximates how long a player was on the field relative to his teammates and had the opportunity to make an offensive rebound. 
+Alternatively, ORp2 sums up all Team offensive rebounds and opponents' defensive rebounds, since these are the possible outcomes for a missed shot by a team. 
+In theory, they should be the same, but for the second formula, we need to sum up all team offensive rebounds and specifically opponents' defensive rebounds, which we can only extract from play-by-play data. Since the two ways require different data, we thought that comparing the results of the two different calculations would be a could test for the coherence and correctness of our data. The result of our efforts were that ORp1 and ORp2 were the same, leaving us with the reassurance that the datasets are complete. Since we were able to calculate the defensive rebound percentage in a similar fashion, we decided to add this variable to our portfolio as well, where:
+
+$DRp = 100*\left(\frac{DRB*TMIN/5}{MIN*(OORB+TDRB)}\right) $
+
+## Further Variable Creation
+As mentioned above, we employed a variety of variables that are not found in the NBA player statistics namely *TPP*, *ORp*, *DRp*, *FGM_ASTp*, *USGp*, *ASTp*, *BLKg* and *STLg*. Some of these are approximations (*ASTp*, *ORp*, *DRp*,*USGp*) for which we use the team sums calculated earlier.
+
+```{r, echo=TRUE}
+Pbox = data.table(Pbox)
+#Four Factor variables
+Pbox[, TPP := 100*(TOV / (FGA+0.45*FTA+TOV-ORB))]
+
+Pbox[, ORp1 := 100*(((TMIN)/5)/(MIN))*(ORB/((TP2A-TP2M)+(TP3A-TP3M)+(TFTA-TFT)))]
+
+Pbox[, ORp2 := 100*((ORB*(TMIN)/5)/(MIN*(TORB+ODRB)))]
+
+# Complementary DRp
+Pbox[, DRp2 := 100*((DRB*(TMIN)/5)/(MIN*(OORB+TDRB)))]
+
+#Usage percentage 
+Pbox[, USGp := (100*((FGA+0.44*FTA+TOV)*(TMIN/5)) / (MIN*(TFGA+0.44*TFTA+TTOV)))]
+
+# Assist percentage (defensive player)
+Pbox[, ASTp := (100*AST/(((MIN/(TMIN/5))*TFGM)-FGM))]
+
+# Blocks and Steals per game
+Pbox[, BLKg := BLK/G]
+Pbox[, STLg := STL/G]
+
+# Dropping teamcolumns we do not need anymore 
+Pbox = subset(Pbox, select = -c(TDRB, TORB, ODRB, OORB, TMIN, TP3M, TP3A, TP2M, TP2A, TFT, TFTA, TFGM, TFGA, TTOV ))
+
+
+Pbox = data.frame(Pbox)
+
+```
+
+## Assists
+The PbP data can be used to illustrate relational data between the players. Using this data, we can extract the assister for every shot made; it is therefore possible to create a network of assists between all players. The nodes in this network represent the player and the directed edges depict who the assist has been made by. The colour of the edges signalise how many assists have been made between a certain assister and a shooter. 
+For the Golden State Warriors, this plot looks as follows:
+```{r include=TRUE}
+PbP.GSW = subset(PbP, PlayTeam=="GSW")
+set.seed(2)
+GSW = assistnet(PbP.GSW)
+plot(GSW, threshold=20, layout = "circle")
+```
+
+```{r include=TRUE}
+PbP.HOU = subset(PbP, PlayTeam=="HOU")
+set.seed(2)
+HOU = assistnet(PbP.HOU)
+plot(HOU, threshold=20, layout = "circle")
+```
+
+Here, we can immediately see the difference between the styles of two teams, the Golden State Warriors, known for their passing prowess, and the Houston Rockets, known more for their reliance upon one player, James Harden. Whilst the GSW have an established network of three assisters (D. Green, K. Durant and S. Curry) and three assisted shotmakers (S. Curry, K. Durant and K. Thompson), HOU only truly has one assister (J. Harden) and one assisted shotmaker (C. Capela). Noticing the significant difference in these graphs gave us the idea to introduce a variable relating to the autonomy of different players in a team.   
+To this end, we extracted not only the number of field goals made, but also whether these goals were made by assists or dribbles. Using this information, we created a variable "FGM_ASTp", giving the percentage of field goals made due to an assist (rather than a dribble). We should mention here that the function employed in the book is not suitable for our use, as it only looks at a single team. We therefore created a new function *assistStat()* that outputs the same measures but for every player in the NBA. Hence, we had to loop through all teams, created the variables by team and then merged our data.
+
+```{r, include=TRUE}
+#Add assist variables 
+assistscore = assistStat(PbP)
+assistscore = merge(tabNames, assistscore, by.x = c("PbP","Team"), by.y = c("Shooter","Team") )
+assistscore = subset(assistscore, select=-c(Bio, PbP, AST, FGM))
+
+# merge by team and player - collation by player occurs at later stage 
+Pbox = merge(Pbox, assistscore , by.x = c("Player","Tm"), by.y =c("Pbox","Team"), all = TRUE)
+```
+
+## Aggregating by Player 
+```{r duplicatetest, include=FALSE}
+Pbox= data.table(Pbox)
+
+#Checking if we have duplicates:
+Pbox[duplicated(Pbox[,c("Tm","Player")]),]
+```
+It is important to note at this point one further issue we faced; many of the players played for at least in two teams during the season. Although it could be argued that a player may change their style when moving between teams, we felt that we were more trying to model a players actual abilities and performance, irrespective of the team they played in. Therefore, we simply combine player statistics using a weighting scheme by the amount of minutes they played for each team.
+```{r, include=FALSE}
+  #Add column to display the total minutes a player plays across season
+  t=Pbox %>%
+    dplyr::group_by(Player) %>%
+    dplyr::summarise(TOTMins=sum(MIN))
+  
+  Pbox=merge(Pbox,t,by.x = "Player",by.y = "Player")
+  
+  #Create weighting column
+  Pbox$Weighting = Pbox$MIN/Pbox$TOTMins
+  
+  #Alter columns by weighting scheme
+  weight_cols = c('height_cm', 'Weight', 'ORp1', 'ORp2', 'DRp2', 'USGp', 'ASTp')
+  for (col in weight_cols) {
+    colVal = as.numeric(Pbox[[col]])
+    Pbox[[col]]= colVal*(Pbox$Weighting)
+    }
+
+  #Standardise percentage variables
+  Pos=Pbox[,c("Player","Pos")]
+    
+  Pbox=Pbox %>%
+    dplyr::group_by(Player) %>% 
+    dplyr::summarise_if(is.numeric,sum)
+  
+  Pbox$Pos=Pos$Pos[match(Pbox$Player,Pos$Player)]
+  
+  #Redo percentages
+  Pbox$FGp=100*Pbox$FGM/Pbox$FGA
+  Pbox$P3p=100*Pbox$P3M/Pbox$P3A
+  Pbox$P2p=100*Pbox$P2M/Pbox$P2A
+  Pbox$FTp=100*Pbox$FT/Pbox$FTA
+  Pbox$FGM_ASTp=100*Pbox$FGM_AST/Pbox$FGM
+  Pbox$TPP=100*(Pbox$TOV / (Pbox$FGA+0.45*Pbox$FTA+Pbox$TOV-Pbox$ORB))
+  Pbox$BLKg=Pbox$BLK/Pbox$G
+  Pbox$STLg=Pbox$STL/Pbox$G
+  
+```
+
+## Event Density Analysis
+As mentioned in the book, a point scored at the beginning of the game is not the same as a point scored at the end of the game. We therefore hypothesised that you could split players by how they behave under certain situations. For a quick example, see the following event density plots, that show how two statistically similar players, Seth and Stephen Curry (similar for a multitude of reasons) play differently under different situations. 
+
+First we can take a look at Seth; here is the density plot of his shots by period time, e.g.  when he takes his shots in each period. 
+```{r Seth Curry,echo=FALSE}
+#See period_densityplot function in appendix for full instruction
+seth=subset(PbP,Shooter=="S. Curry" & PlayTeam=="POR" & ShotType!="FT" & ShotOutcome!="")
+period_densityplot(seth,title="Seth Curry Density Plot (by Period of Play)")
+```
+
+As you can see, Seth Curry primarily takes his shots at the beginning of quarters, in the less high pressure moments of the game, where the marginal gain of making a shot tends to be less than at the end of the quarter.
+
+Let us compare that with the analogue plot of his brother, the more acclaimed player of the two, Stephen Curry.    
+```{r,echo=TRUE}
+steph=subset(PbP,Shooter=="S. Curry" & PlayTeam=="GSW" & ShotType!="FT" & ShotOutcome!="")
+period_densityplot(steph,title="Stephen Curry Density Plot (by Period of Play)")
+```
+
+Now, even though by height, weight, FGp, P3p and P2p, the two are similar, this analysis shows us that Steph Curry actually increases the frequency of shooting towards the end of the period, where there is a far higher pressure level. This indicates that his team relies on him far more than that of his brother to gather points in the more important end of the quarter. This type of analysis shows that there may be a possibility to add a score to the clustering analysis measuring how well players perform under different pressured situations. 
+
+It is therefore imperative to create a '__difficulty__' (diff) variable to seperate players not only on their abilities by game and minute statistics, but how they perform under certain situations. We do this by creating the following variable for player $i$, $X_i$, as suggested in the book:
+
+$$  X_{i} = \frac{1}{N}\sum_{j=1}^{N}(I({S_j})-P({S_j})) $$, where $I()$ is the indicator function for whether shot $S_j$ was scored by player $i$, and $P(S_j)$ is the probability that $S_j$ is scored (also a measure of difficulty of the shot). Therefore, we take the average result of shot outcome minus shot difficulty. Here, an easy shot has a high probability, so the shot outcome is penalised more than that of a difficult, low probability shot.
+
+We now add the difficulty scores, by taking the mean from the PbP shot difficulty scores to the Player stats data frame, "Pbox".
+```{r, include=FALSE}
+  #Combine players
+  
+  #Add a column in PbP specifying shooter by Pbox naming convention
+  tabTemp=subset(PbP,Shooter!="")
+  
+  #Add ID col to tabNames & tabTemp for ease of use
+  tabNames$ID=paste(tabNames$PbP,tabNames$Team,sep = "_")
+  tabTemp$ID=paste(tabTemp$Shooter,tabTemp$PlayTeam,sep = "_")
+  
+  #add pbox names to tabTemp
+  tabTemp$Pbx_names=tabNames$Pbox[match(tabTemp$ID,tabNames$ID)]
+```
+
+```{r difficulty,include=TRUE}  
+  #Add difficulty score from PbP to Pbox
+  tabTemp <- tabTemp %>%
+    dplyr::group_by(Pbx_names) %>%
+    dplyr::filter(Shooter!="") %>%
+    dplyr::summarise(diffM=mean(score_diff))
+
+  ##merge
+  Pbox = merge(Pbox,tabTemp, by.x = "Player",by.y = "Pbx_names",all.x = TRUE)
+  
+  rm(tabTemp)
+```
+
+```{r, include=FALSE}
+  #Function to clean the Pbox for clustering
+  Pbox=CleanData(Pbox)
+```
+
+In order to show that this thinking could split up the outdated "5 roles", we take a look at two players who play in the same position (Point Guard). These players, by classic comparison (on percentages, not totals), seem very similar. We can find these players by incrementally reducing the size of the dataset as follows:
+
+First, lets look at only the players who traditionally play as point guards, as defined by Basketball-Reference (with over 1000 minutes) using the following code, and plot their Field Goal Percentage against difficulty:
+```{r, echo=FALSE}
+PG=subset(Pbox,Pos=="PG" & MIN>1000)
+X=PG$FGp
+Y=PG$diffM
+labels=PG$Player
+size=0.7
+plot(X,Y,xlab="Field Goal Percentage",ylab="difficulty score")
+text(X,Y,labels,cex=size,font=2,pos=1)
+```
+
+Next, we can select all those who have either a significantly small or large difficulty score (we use the scatterplot here, and look for players with difficulty score less than -0.04, or greater than 0.02). We also extract players with outlying FGp scores: 
+```{r echo=FALSE}
+PG=subset(PG,(diffM<=-0.04 | diffM>=0.02) & (FGp>=42 & FGp<=46))
+X=PG$FGp
+Y=PG$diffM
+labels=PG$Player
+plot(X,Y,xlab="Field Goal Percentage",ylab="difficulty score")
+text(X,Y,labels,cex=size,font=2,pos=1)
+```
+
+Finally, view all those players who have the same height (190.5cm in our case):
+```{r, echo=FALSE}
+PG=subset(PG,(height_cm==190.5))
+X=PG$FGp
+Y=PG$diffM
+labels=PG$Player
+plot(X,Y,xlab="Field Goal Percentage",ylab="difficulty score")
+text(X,Y,labels,cex=size,font=2,pos=4)
+```
+
+We have reduced the data to six very similar players (by FGp, Position & height) with fairly varying difficulty scores. 
+
+Lets take a look at two, Damian Lillard ![](lillada01.jpg), and Dennis Smith ![](smithde03.jpg):
+
+```{r, echo=FALSE}
+DL=data.frame(t(subset(PG,Player=="Damian Lillard",select=c(Weight,height_cm,FGp,P2p,P3p,BLKg,ASTp,diffM))))
+colnames(DL)="ValueDL"
+DS=data.frame(t(subset(PG,Player=="Dennis Smith",select=c(Weight,height_cm,FGp,P2p,P3p,BLKg,ASTp,diffM))))
+colnames(DS)="ValueDS"
+df=Pbox
+
+df=dplyr::mutate_if(df,is.numeric,function(x) -x)
+df=dplyr::mutate_if(df,is.numeric,rank)
+
+DL$RankDL=t(round(subset(df,Player=="Damian Lillard",select=c(Weight,height_cm,FGp,P2p,P3p,BLKg,ASTp,diffM))))
+DS$RankDS=t(round(subset(df,Player=="Dennis Smith",select=c(Weight,height_cm,FGp,P2p,P3p,BLKg,ASTp,diffM))))
+DL$ValueDL=round(DL$ValueDL,digits=2)
+DS$ValueDS=round(DS$ValueDS,digits=2)
+DS$Rank_Difference=DS$RankDS-DL$RankDL
+df=cbind(DL,DS)
+df %>%
+dplyr::mutate(
+Variable=cell_spec(row.names(.),bold=T),
+ValueDL = cell_spec(ValueDL, align = "center"),
+RankDL = ifelse(RankDL > 400,cell_spec(RankDL, color = "red", bold = T,italic=T),
+         ifelse(RankDL < 100,
+                    cell_spec(RankDL, color = "green", bold = T,italic=T),
+                    cell_spec(RankDL, color = "black", bold=T,italic=T))),
+ValueDS = cell_spec(ValueDS, align = "center"),
+RankDS = ifelse(RankDS > 400,cell_spec(RankDS, color = "red", bold = T,italic=T),
+        ifelse(RankDS < 100,
+                    cell_spec(RankDS, color = "green", bold = T,italic=T),
+                    cell_spec(RankDS, color = "black", bold=T,italic=T))),
+Rank_Difference=color_bar("lightgreen")(Rank_Difference)) %>%
+dplyr::select(Variable,everything()) %>%
+kable(escape=F,col.names=c("Variable","Value","Rank","Value","Rank","Rank Difference")) %>%
+kable_styling("hover","bordered",full_width = F) %>%
+column_spec(6,width="5cm") %>%
+column_spec(c(3,5),bold=T) %>%
+add_header_above(c(" "=1,"Damian Lillard" =2,"Dennis Smith"=2," "=1))
+```
+
+As seen above, statistically similar players can have vastly different difficulty scores, and this is an argument for including the variable "difficulty" in our analysis.
+
+# Variable Selection
+At an early stage, we had the option betweeen ‘__field goals made from dribbles__’ (FGM_DRIBp), the variable measuring how many field goals a player made through individual offensive skill and score from dribbling. FGM_DRIBp is fully, negatively correlated with ‘__field goals made of assists__' (FGM_ASTp), since they measure the same thing on a different scale. Therefore we dropped FGM_DRIBp from our analysis. It must be noted that FGM_ASTp and ASTp are also negatively correlated. However, as mentioned in our variable creation part, we thought FGM_ASTp reveals interesting and unique patterns that cannot solely be explained by ASTp. On the other side, removing ASTp would remove a fundamental variable and aspect of the game, which is why we decided to keep them both. 
+
+Furthermore, the commonly used statistics FGp was highly correlated with both P2p as well as P3p. This left us with two options: analyze FGp by itself, or analyze P2p and P3p which are not highly correlated and give more detail. We decided to go with the latter as two better capture the different types of shooters; mid-range shooters, long-rang shooters and lethal goal scores who do well in both. Furthermore, offensive and defensive rebounds were highly correlated leaving us with 3 solutions; firstly, include just one of them, combine them into a total rebound variable or keep both. We decided to go with the last option as we believe that there is some importance in separating players that excel in both or excel in just one of them. The variable MIN was removed as we believe that it might distort between cluster heterogeneity and we created the USGp variable which measures a players involvement in team possessions would better exemplify a players importance than minutes played. Finally, variables such as height and weight were not included in our analysis for two reasons, some players don't conform to the norms of roles typically associated with a specific height or weight and that would again affect our final solution and secondly, we wanted to limit the number of dimensions we were clustering the players by and believed other variables to be more important in understanding player profiles and what they offer.  
+
+Considering all the above, we based our clustering on the following 12 variables: P2p,P3p,FTp,ORp,DRp,ASTp,BLKg,STLg,TPP,FGM_ASTp,USGp,diff. 
+It can be seen from the plot below that most of these variables are uncorrelated or show insignificant levels of correlations while the ones that do have been thought out and purposefully included.
+
+```{r Data Creation with cluster variables, echo=FALSE}
+# df_select is the dataframe that we are working with
+Pbox = dplyr::rename(Pbox,diff=diffM, ORp = ORp2, DRp = DRp2)
+df = Pbox
+df[is.na(df)] = 0
+mMIN = 500
+df = subset(df, MIN>=mMIN)
+ID = df$Player
+df_select= subset(df, select = c(FTp,P2p, P3p, diff, ORp, DRp, USGp, ASTp, FGM_ASTp, TPP, STLg,BLKg))
+```
+
+```{r, echo=TRUE}
+## study of correlation analysis to see if all variables should be included
+out=cor(df_select)
+corrplot(out, type = "lower", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+
+# MDS
+From a non-technical point of view, the purpose of multidimensional scaling (MDS) is to provide a visual representation of the pattern of proximities (i.e. similarities or distances) among a set of objects. 
+It takes a N-dimensional distance matrix and transforms it to a reduced R-dimensional space while trying to preserve the true distances as well as possible.
+Given the theory behind MDS written above, please remember when reading the MDS plots below: 
+
+* The axis do not represent any particular variable, they are a reduced version of the original   variables
+* orientation of the map is arbitrary
+* all that matters is the closeness between points 
+
+## Stress Index
+In order to measure the goodness-of-fit, we use something called the stress index. It can be seen as the loss function we try to minimise with respect to the distances between points. The lower the stress index, the more closely the distances in the reduced R-dimensional space depict the orignal N-dimensional space. 
+
+## Non-metric Approach
+Since our data is not a true distance matrix, we use the non-metric approach, which means standardizing the inputs and manually transforming it into a distance matrix. From our research we deducted that the recommended approach to guarantee optimized results is to use the ***MASS::isoMDS()** function, with the start-configurations of the algorithm being the result of the theoretical metric MDS approach. The same method has also been used in the MDS mapping used in the book, which reassures us that this is the right approach for our dataset.  
+
+  
+## Number of Dimensions
+We ran the MDS on multiple dimensions to see if we can optimize the stress index in dimensions that we can still visualize, meaning two or three dimensions.  The lower the dimension, the higher the chance that we may be underfitting.
+We considered the stress index to assess the quality of the visualisation. Zuccolotto and Manisera (2020) give a threshold of 20% which should not be exceeded. In other sources we have read of 10% being a fair fit. We therefore intended to keep our stress index as low as possible.
+Running through MDS with varying dimensions gave us the following results: 
+```{r Stress Index for different dimensions, echo=TRUE}
+# Looping through k dimensions to determine the stress index 
+k = 10
+v = c(1:k)
+for (i in seq(k)){
+  v[i] = round(MDS(df_select,i)[["stress"]],2)
+}
+
+# Plotting the stress index for all k dimensions
+plot(x = c(1:length(v)), y = v, type="b", col= "dark red", 
+     xlim=c(1,k+0.5),
+     xlab = "Number of MDS Dimensions", ylab="Stressindex in %",
+     main = "Stressindex for multiple dimensions")
+points(v, pch=16, col="dark red")
+text(x = c(1:length(v)), y = v, labels=v, pos=4, cex=0.6)
+```
+
+As expected, the higher the number of dimensions, the better the performance of the algorithm. Since we use MDS for visualization purposes we need to constrain our options up to three dimensions. However, we can derive a significant reduction of the stress index from 19% (2D) to 11% under 3D scaling. Hence, where possible, we implement a 3D MDS scaling. 
+
+## Variable Overview
+To have a nice overview of the patterns through the players, we plotted all the variables that we are using on two dimensions, using multidimensional scaling. We are aware that 3-dimensional plots offer a more truthful depiction of the similarities between players, but for the purposes of a nice overview we are depicting the variables in grids of two-dimensional static plots. We also employed a function to show a 3-dimensional static plot using the ggplot-library named *threed()*, but we observed a nicer visualisation in two dimensions. Hence, we employed a two-dimensional plotting function named *twod()*. This function is based on the plotting function that the BasketballAnalyzeR uses, but recreated to fit our preferred style and labelling. We constrain our dataset to all players that played more than 500 minutes, to be consistent with our cluster analysis.     
+```{r Variable Visualization, include=FALSE}
+# Calculate MDS and the points for the reduced two dimensions
+points = MDS(df_select, 2, std=TRUE)[["points"]]
+points = data.frame(points)
+colnames(points) = c("X1","X2")
+
+#add them to the end of our dataset
+df = cbind(df_select, points)
+```
+
+```{r var1-4, echo=FALSE}
+# plotting all variables on this reduced dimensional space and arranging them in a 2x2 plot
+p1 = twod(df, c("X1","X2"), "FTp")
+p2 = twod(df, c("X1","X2"), "P2p")
+p3 = twod(df, c("X1","X2"), "P3p")
+p4 = twod(df, c("X1","X2"), "diff")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+```{r var5-8, echo=FALSE}
+o1 = twod(df, c("X1","X2"), "ORp")
+o2 = twod(df, c("X1","X2"), "DRp")
+o3 = twod(df, c("X1","X2"), "USGp")
+o4 = twod(df, c("X1","X2"), "TPP")
+
+grid.arrange(o1, o2, o3, o4, nrow = 2)
+
+```
+
+```{r var9-12, echo=FALSE, fig.cap="2D MDS Plots by variable"}
+q1 = twod(df, c("X1","X2"), "ASTp")
+q2 = twod(df, c("X1","X2"), "FGM_ASTp")
+q3 = twod(df, c("X1","X2"), "STLg")
+q4 = twod(df, c("X1","X2"), "BLKg")
+
+grid.arrange(q1, q2, q3, q4, nrow = 2)
+```
+
+The joint evaluation of the variable graphs helps understand the patterns of players’ profiles. An interesting example we observe is that ASTp and FGM_ASTp is quite highly negatively correlated, since they increase in opposite directions on the map. This relationship links to the type of player. To give an example, the point guard  will reach the end of the three-point line and either look to provide an assist or may attempt to score, but he is unlikely to then be assisted himself. So therefore, he will be characterised by a high ASTp or he will be shooting himself, but a low FGM_ASTp. Another observation to look at is the 2-point-percentage and 3-point-percentage, where it looks like that players who excel at scoring 2 pointers, are below average in scoring 3 point shots. Additionally, we see that the Field-throw-percentage and 3-point-percentage behaves similar. A possible explanation could be that if someone is good at 3-pointers, they also perform well in free throws. This also gives a nice view on our difficulty score, which shows that it follows a completely different pattern to the three types of throws we have.
+With regard to ORp and DRp, we can see that these variables behave similar along the graph. If someone brings defensive rebound qualities, they simultaneously show strength in the harder to achieve offensive rebounds.
+
+# Cluster Analysis
+
+## Initial Study
+With our newly created variables mentioned previously our aim is to use $k$-mean clustering to try and go beyond the 5 traditional basketball positions (Point Guard, Shooting Guard,Small Forward, Power Forward and Center). This is mainly because the game has evolved over time such that these roles have become outdated and don't encapsulate the different player roles and playing style we see in the modern NBA. Although not shown in this analysis shooting maps have evolved from the majority of shots occurring from mid-range and "the paint" towards 3 point shots around the arc and most recently to even beyond that most popularized by Golden State Warriors' Stephen Curry. There are many different ways people have attempted to recreate these roles, most notably through the use of Topological Data Analysis, a combination of fuzzy clustering and a Self-Organizing Map.  
+
+Due to its simplicity we will attempt to leverage $k$  means to re-visualize 13 player profiles. *kclustering* has to be used in two steps; firstly without specifying the number of $k$ clusters and a second time with a defined $k$. Although we already know $k$ in this scenario we will still study the BD/TD ratio plot for completeness. As you may recall the BD/TD ratio graph plots the evolution of BD/TD ratio and the number of clusters. More specifically, the solid line represents the BD/TD evolution, which clearly improves as the numbers of clusters increase. The dotted line represents the percentage increase of the BD/TD ratio moving from $(k-1)$ to $k$-cluster solution.  
+
+Generally, BD/TD values higher than 50% are considered satisfactory. Nonetheless, there are two factors that must be balanced. A high BD/TD ratio and the number of clusters. Evaluating the two lines obtained in Figure 1 we can identify a threshold where firstly, the BD/TD ratio is high enough ($BD/TD>$50%). Secondly the percentage increase in the BT/TD ratio from moving to more clusters is too low to justify adding another cluster to the solution (an elbow in the dotted line or increase 5%-10%).
+\pagebreak
+
+```{r Inital K Means Study, figure.cap="Clusterization Quality"}
+###kmeans
+# inital k means to test test
+set.seed(1)
+kmeans_extension<- kclustering(df_select,nclumax = 15)
+plot(kmeans_extension)
+```
+
+Keeping in mind the conditions mentioned above a quick analysis of the plot shows that the ideal number of cluster would be 7 where we have a BD/TD ratio 52.14% and an increase in overall quality of 5.01%. Furthermore, it seems to be a good balance between BD/TD ratio and number of clusters. The resulting radial plots from such a clusterization is illustrated below for the sake of completeness. 
+
+```{r Clustering of 7 , figure.cap="Radial Plot of 7 Player Profiles",fig.dim=c(10,10)}
+#8 clusters 
+set.seed(1)
+kclu8=kclustering(df_select,labels=ID,k=7)
+plot(kclu8,profiles=TRUE)
+```
+
+13 clusters would give us a overall BD/TD ratio of 61.14% and represents a minuscule improvement of 1.66% on 12 clusters. Although one may argue that the increase in the BD/TD ratio resulting from an increase in clusters is unwarranted our attempt to create 13 player profiles compels us to do so.
+
+```{r 13 Cluster recreation, figure.cap="13 Player Profiles",fig.dim=c(10,10)}
+#13 clusters to recreate book
+set.seed(1)
+kclu13=kclustering(df_select,labels=ID,k=13)
+# each clusters chi radial plot
+plot(kclu13,profiles=TRUE)
+```
+
+Before examining the radial plots it worth recollecting that CHI=1 represents a cluster that on average has the same variability as the entire data set so that the cluster is undermined. On the other hand, CHI<0.5 is a satisfactory result, nonetheless values higher than 0.5 might be considered satisfactory if the number of cases is high.  
+
+
+Keeping the above in mind it seems that the clusters are mostly homogeneous but for a few clusters. Namely, Cluster 8 $CHI$=0.62, and Cluster 3 $CHI$=0.67 and to a lesser extent Cluster 7 and Cluster 6 CHI=0.56 and CHI=0.53 respectively.
+
+```{r MDS Set Up, echo=FALSE}
+# MDS
+points = MDS(df_select, 3, std=TRUE)[["points"]]
+points = data.frame(points)
+colnames(points) = c("X1","X2", "X3")
+
+
+# Clustering
+subjects = kclu13[["Subjects"]]
+
+#Combining results 
+ID = ID
+df_extend = cbind(subjects, df_select)
+df_extend = cbind(df_extend, points)
+
+
+# we want the clusters to be discrete, that is why we are transforming them into factors 
+df_extend$Cluster = as.factor(df_extend$Cluster)
+
+```
+
+```{r plotting}
+
+ax <- list(
+  title = "",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = FALSE,
+  showgrid = TRUE
+)
+
+fig = plot_ly(df_extend, x = ~X1, y = ~X2, z =~X3, color = ~Cluster, 
+              colors = colorRampPalette(brewer.pal(10,"Spectral"))(41),
+              marker = list(size = 5),
+              hoverinfo = 'text',
+              text = ~paste('</br> Player: ', Label,
+                             '</br> Cluster: ', Cluster))
+fig = fig %>% layout(scene = list(xaxis= ax, yaxis = ax, zaxis=ax), legend=list( title=list(text='<b> Cluster </b>'))) 
+fig = fig %>% add_markers()
+fig 
+```
+(Note: By hovering over nodes, we obtain the player represented by this node. We can also select and deselect clusters, to get a reduced view of a subset of players)
+
+The MDS plot gives a more visualized representation of our clusters and how they differ. If clusters are very close together, it indicate that they are very similar, showing a potential weakness of our clustering algorithm. If it was not for the replication of specifically 13 new player roles, we would use this as an additonal implication to reduce the number of clusters.
+The visualization also depicts within cluster homogeneity and more interestingly, between cluster heterogeneity. More specifically, it can be seen that Cluster 3 and Cluster 7 show the most between cluster heterogeneity, a characteristic that can be seen to a lesser extent with Cluster 6, 10 and 8. On the other hand, Cluster 12 , Cluster 13 and Cluster 1 seem to show the least between cluster heterogeneity. 
+Further, the MDS plot allows us to quickly analyze the above mentioned clusters with critical $CHI$ values.For example examining Cluster 8, we find that Lonzo Ball, and to a lesser extent, Draymond Green and Ben Simmons, exemplify the high heterogeneity in the cluster as well.  It also shows the similarity between clusters. Similarly, if we isolate Cluster 3 in the plot, we see a very high dispersion of players. More specifically, we can see that Tyson Chandler, and to a lesser extent, Shaun Livingston, exemplify the high heterogeneity in the cluster. Looking at the $CHI$ values for cluster 3, we see that players in this cluster have a significantly low P3p. Tyson Chandler is an outlier in our dataset with a P3p of 0%, since he only attempted one shot from the 3-point line (which he has missed). Clustering players with such extreme values wrongly impacts the cluster characteristics. Therefore, a further extension of our work could be to exclude these kind of outliars, to not distort our data. 
+
+## Cluster Breakdown
+
+**Cluster 1**:  
+Players Defensive Attributes : Players are above average with regards to blocks and defensive rebounds. While they are below average when it comes to steals.  
+Players Offensive Attributes: Players are above average with regards to 2P and 3P percentages,  offensive rebounding and field goals made off of assists, while they are average with regards to free throws and they are below average with regards to assists.  
+Players Play Involvement: Players are above average with regards to turn overs per possession, and are below average in overall involvement in team possessions. Finally, players perform below average in their performance in difficult situations.    
+
+**Cluster 2**:
+Player Defensive Attributes: Players are above average with regards to blocking and defensive rebounding, while they are below average with regards to steals.  
+Player Offensive Attributes: Players are above average with regards to 2P and 3P percentages as well as offensive rebounds, free throws and  field goals made off of assists. While they are below average with regards to assists.  
+Players Play Involvement: Players are below average with regards to turnovers per possession as well as involvement in team possessions. Finally, they perform above average in difficult situations. 
+
+**Cluster 3**:  
+Player Defensive Attributes: Players are above average with regards to blocking and defensive rebounding while they are below average in steals.  
+Players Offensive Attributes: Players are above average in 2P percentage and field goals made off of assists where as they are below average with regards to 3p percentage free throws and assists.  
+Players Play Involvement: Players are above average in turnovers per possession and are below average in their involvement in the teams possessions. Finally, the are average in their performance in difficult situations.  
+However, this cluster requires further inspection as previously mentioned due to its high $CHI$ value, therefore  players must be looked at individually and an inspection of the MDS plot allows us to see the most deviating players.  
+
+**Cluster 4**:  
+Player Defensive Attributes: Players are above average with regards to blocks, defensive rebounds while they are below average in steals.  
+Player Offensive Attributes: Players are above average with regards to 2P percentage, offensive rebounds and field goals made off of assists, while they are average with regards to free throws and 3P percentage. 
+Player Play Involvement: Players are above average in their involvement in team possessions as well as turnovers per possession. Finally they are above average in their performance in difficult situations.  
+
+**Cluster 5**:  
+Players Defensive Attributes: Players are below average in all defensive attributes.  
+Player Offensive Attributes: Players are below average in all offensive attributes but for assists where they are barely above average.  
+Players Player Involvement: Players are average in their involvement in team possessions and turnovers per possession. Finally, the perform below average in difficult situations.    
+
+**Cluster 6**:  
+Players Defensive Attributes: Players excel with regards to blocking and rebounding and are above average with regards to steals.  
+Players Offensive attributes: Players are above average in all categories except 3P percentage and field goals made off of assists where they are average.  
+Players Play Involvement: Players are above average in their involvement in team possessions and are average with regards to turn overs per possessions. Finally, they are above average in their performance in difficult situations.  
+
+**Cluster 7**:  
+Players Defensive Attributes: Players Excel in blocking and are above average with regards to defensive rebounds and to a lesser extent steals.  
+Players Offensive Attributes: Players Excel in offensive rebounds and to a lesser extent 2P percentage, and are above average in field goals made off of assists, while they are below average with regards to free throws, 3P percentage and assists.  
+Players Play Involvement: Players are average in their involvement in team possessions and are are above average with regards to turnovers per possession. Finally, they are above average in their ability to perform in difficult situations.  
+
+However, this cluster requires further inspection as previously mentioned due to its high $CHI$ value, therefore  players must be looked at individually and an inspection of the MDS plot allows us to see the most deviating players.  
+
+**Cluster 8**:  
+Players Defensive Attributes: Players are above average with regards to steals, while they are average with regards to blocks and slightly below average with regards to defensive rebounds.  
+Players Offensive Attributes: Players are below average in all offensive attributes except for assists where they top the league.  
+Players Play Involvement: Players are above average in their involvement in team possessions and well above average with regards to turn overs per possession. Finally, they are well below average in their performance in difficult situations.  
+
+However, this cluster requires further inspection as previously mentioned due to its high $CHI$ value, therefore  players must be looked at individually and an inspection of the MDS plot allows us to see the most deviating players.  
+
+**Cluster 9**:  
+Players Defensive Attributes: Players are below average in all defensive attributes except for being average with regards to steals. 
+Players Offensive Attributes: Players are are above average with regards to assists ,free throws and 3P percentage while they are below average in the remaining categories.  
+Players Play Involvement: Players are slightly above average in their involvement in team possession, and are average with regards to turn overs per possession. Finally, they are slightly below average in their performance in performance in difficult situations.  
+
+**Cluster 10**:  
+Players Defensive Attributes: Players are above average with regards to steals, average with regards to blocks and slightly below average with regards to defensive rebounds.  
+Players Offensive Attributes: Players Excel in assists, while they are above average with regards to free throws and to a lesser extent 3P percentage. Furthermore, they are average with regards to 2P percentage and well below average with regards to offensive rebounds and even more with regards to points made off of assists.  
+Players Play Involvement: Players are highly involved in their teams possessions and are slightly below average with regards to turn overs per possession. Finally they are above average in their performance in difficult situations.  
+
+**Cluster 11**:  
+Players Defensive Attributes: Players are average with regards to blocks and defensive rebounds, while they are slightly below average with regards to steals. 
+Players Offensive Attributes: Players are above average with regards to 2P percentage and field goals made off of assists, while they are average with regards to 3P percentage, offensive rebounds and are below average with regards to assist, free throws. 
+Players Play Involvement: Players are below average in their involvement in their teams possessions and turn overs per possession. Finally, they are slightly below ability in their performance in difficult situations.  
+
+**Cluster 12**:  
+Players Defensive Attributes: Players are below average with regards to all defensive attributes.  
+Players offensive attributes: Players are above average with regards to free throws, 3P percentage and field goals made off of assists. While they are average with regards to 2P percentage and are below average with regards to assists and offensive rebounds.  
+Players Play Involvement: Players are slightly below average in their involvement in their teams possessions and well below average with regards to turnovers per possession. Finally they are above average in their performance in difficult situations.  *
+
+**Cluster 13**:  
+Players Defensive Attributes: Players are above average with regards to steals, and slightly above average with regards to blocks, and average with regards to defensive rebounds.  
+Players Offensive Attributes: Players are slightly above average with regards to free throws, 3P percentage and field goals made off of assists, while they are slightly below average with regards to 2P percentage, offensive rebounds and assists.  
+Players Play Involvement: Players are average in their involvement in their teams possessions and are below average with regards to turnovers per possession. Finally they are slightly above average with regards to their performance in difficult situations.   
+
+# Variable selection analysis
+One of the issues we face is to both generate informative, new variables on which to cluster by, and to remove variables that contain collinearity and add to the risk of overfitting. Therefore we wish to get rid of 'noisy' variables. These are variables that will have little effect on clustering, or in other words, have a similar distribution over all clusters. 
+
+
+## Variable Selection Algorithm (Raftery and Dean, 2006)  
+In order to perform a more statistically based analysis of which variables are effective for clustering, we follow two papers primarily. Firstly, Raftery and Dean (2006) gives the intuition for using a Bayesian Information Criterion for choosing one model over another. It indicates that the problem of variable selection is actually a Bayesian one, as we wish to infer the evidence for one model over another, given the likelihood of the data given either model. In our case, say we have 3 sets of variables;
+* $Y_1$ = already selected variables 
+* $Y_2$ = variables considered for inclusion/exclusion
+* $Y_3$ = remaining variables
+
+The two possible models we wish to consider are $M_1$, a model indicating that the set of considered variables, $Y_2$ are conditionally independent of cluster membership, and therefore do not give extra information for clustering. $M_2$ asserts that $Y_2$ cannot be seperated conditional on $Y_1$, and therefore does give extra information on the cluster membership.In short, $M_1$ assumes that the variables do not support the clustering and should be excluded, while $M_2$ assumes that these variables add value and should be included. We can see this written below: 
+
+$$M_1:  p(Y|z)=p(Y_3|Y_2,Y_1)p(Y_2|Y_1)p(Y_1|{z})$$
+and 
+
+$$M_2: p(Y|z)=p(Y_3|Y_2,Y_1)p(Y_2,Y_1|{z})$$
+where $z$ is the unobserved set of cluster memberships.
+
+We can then assess the evidence for whether to include $Y_2$ using a bayes factor of the data, given either model: 
+
+$$Bayes Factor=\frac{p(Y|M_1)}{p(Y|M_2)}$$
+
+We can approximate this factor by using the Bayesian Information Criterion, which for a given clustering model is written
+
+$$BIC_{clust}=2LL(D)-\rho*log(n)$$
+
+Where $LL()$ is the log likelihood function of the model that we use, and $\rho$ is defined as the number of parameters in the model. This is a good approximation to the bayes factor, so in order to assess the evidence for including a variable in the clustering, we compare the BIC before adding it, and the BIC after adding it. As one can see from the formula below, there is a slight correction for dimensionality, to ensure that the BIC doesn't get consistently worse from the addition of new variables. This correction is the $BIC_reg$ term, that accounts for the explanatory nature of the already included variables for the new variable $y_i$. Therefore, we measure the evidence for not clustering with $y_j$ as a combination of the evidence for clustering on just $Y_1$ and the explanatory nature of variables already in $Y_1$. So, if the variables of $Y_1$ do not explain $y_j$ at all, $y_j$ is more likely to have clustering potential, and this is reflected in the large negative $BIC_{reg}$ resulting from the poorly fitting linear model
+
+$$BIC_{diff}(y_i)=BIC_{clust}(Y_1 \cap y_i) -BIC_{notClust} $$
+$$\text{where} \ BIC_{notClust}=BIC_{reg}(y_i \sim Y_1)+BIC_{clust}(Y_1)$$
+
+As is often noted in the literature, an intuitive approximation for the k-means clustering algorithm is that of the multivariate gaussian mixture clustering model. K-means aims to reduce the total sum of squared errors, or in real terms, the total distance from each point to the center of their assigned cluster. The gaussian model is useful, as once we have our centroids, one can show that the maximum likelihood estimate for the variance of the gaussian model is in fact the exact same sum of squares that we minimized in the k means algorithm. We can therefore make the assumption that each cluster is distributed by a spherical, constant variance gaussian model, and use the likelihood function from a gaussian to estimate the cluster fit. This assumption is certainly open to criticism, since assuming that all clusters have the same shape can be a quite strong assumption. However, we do not cover these issues here. One can see how this is implemented in the function "bic_kmeans" in the appendix.
+
+Finally we implement all of this theory using a greedy search algorithm, as suggested by Raftery and Dean. This entails the following, 5-step procedure:
+1. Find the variable out of our selection that gives the best evidence of univariate clustering on the data chosen. Include this variable into the set $Y_1$
+2. Find the variable from the remaining variable set that gives the best evidence of bivariate clustering with the variable chosen in step 1. Include this variable into $Y_1$
+3. Search the remaining variables, and find the variable that gives the best evidence of clustering with the already selected variable set $Y_1$, and if the evidence for clustering outweighs the evidence against ($BIC_{diff}>0$), include this variable. If not, do nothing
+4. Search the variables we currently have in $Y_1$ for the variable with the worst evidence for clustering. If the evidence for removing this variable outweighs the evidence for keeping it ($BIC_{diff}<0$), remove this variable
+5. Repeat stages 3 and 4 until both do not produce an alteration of the variables in $Y_1$. When this happens, output $Y_1$ as the variables for clustering
+
+## Running Variable Selection under different settings
+We will now run the variable selection algorithm (which can be found in the appendix) using a number of settings for the k-means. We vary the number of starts, and run the algorithm to  
+
+```{r variable selection setup,echo=FALSE}
+data=Pbox
+data[is.na(data)] <- 0
+ID=ID
+data=subset(data,MIN>=mMIN,select=c(FTp,P2p,P3p,diff,ORp,DRp,USGp,ASTp,FGM_ASTp,TPP,height_cm,Weight,MIN,PTS,STLg,BLKg))
+```
+
+* number of starts = 1, target 13 clusters? = Yes
+```{r,echo=TRUE}
+#Run Variable Selection Algorithm 13 clusters, on all percentage variables
+set.seed(1)
+var13=VariableSelect(data,13,13,nStarts = 1,printFull = TRUE)
+```
+
+* number of starts = 25, target 13 clusters? = Yes
+```{r,echo=FALSE}
+#Run Variable Selection Algorithm 13 clusters, on all percentage variables, now with 25 starts
+set.seed(1)
+varTemp=VariableSelect(data,13,13,nStarts = 25)
+```
+
+* number of starts = 1, target 13 clusters? = No
+```{r,echo=FALSE}
+#Run Variable Selection Algorithm 13 clusters, on all percentage variables, now with 25 starts
+set.seed(1)
+varTemp=VariableSelect(data,2,13,nStarts = 1)
+```
+
+
+* number of starts = 25, target 13 clusters? = No
+```{r,echo=FALSE}
+#Run Variable Selection Algorithm 13 clusters, on all percentage variables, now with 25 starts
+set.seed(1)
+varTemp=VariableSelect(data,2,13,nStarts = 25)
+```
+
+## Clustering Output from Variable Selection Algorithm 
+
+Due to our attempt to recreate the 13 player roles and for speed purposes, we use the initial approach, of targeting 13 clusters, with one random start. 
+
+```{r BIC Clustering, echo=FALSE}
+#Set data frame to only include only these variables
+df = data[,var13]
+
+# Calculate kclustering with the selected variables
+set.seed(1)
+kclust_bic = kclustering(df, labels = ID, k=13)
+
+# Plot the Chi-changes
+plot(kclust_bic,profiles=TRUE)
+```
+
+```{r, echo=FALSE}
+# MDS
+points = MDS(df, 3, std=TRUE)[["points"]]
+points = data.frame(points)
+colnames(points) = c("X1","X2", "X3")
+
+# Clustering
+bic_clust=kclust_bic[["Subjects"]]
+
+#Combining results 
+
+df$Player = ID
+df = cbind(df, points)
+df = merge(df, bic_clust, by.x = "Player", by.y = "Label")
+df = dplyr::rename(df, bic_clust = Cluster)
+
+# we want the clusters to be discrete, that is why we are transforming them into factors 
+df$bic_clust = as.factor(df$bic_clust)
+```
+
+```{r mds,echo=FALSE}
+ax <- list(
+  title = "",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = FALSE,
+  showgrid = TRUE
+)
+
+fig = plot_ly(df, x = ~X1, y = ~X2, z =~X3, color = ~bic_clust, 
+              colors = colorRampPalette(brewer.pal(10,"Spectral"))(41),
+              marker = list(size = 5),
+              hoverinfo = 'text',
+              text = ~paste('</br> Player: ', Player,
+                             '</br> Cluster: ', bic_clust))
+fig = fig %>% layout(scene = list(xaxis= ax, yaxis = ax, zaxis=ax), legend=list( title=list(text='<b> Cluster </b>'))) 
+fig = fig %>% add_markers()
+fig 
+```
+
+
+According to the algorithm in order to maximize cluster within homogeneity we should only use four variables namely P3p, ASTp, BLKg and ORp. *It must be noted that from a basketball perspective a lot is lost when the rest of the variables are dropped and not a lot of information is given when studying players across such dimensions.* This could suggest three things: Firstly,our original variables selected might not be the correct set of variables to use to study player profiles. Secondly, it could suggest that a more complex algorithm besides Cluster Analysis is needed to redefine and capture player roles in the modern NBA. Finally, within cluster homogeneity may not be the required goal of the analysis and we must accept some low homogeneity within clusters to fully capture the different roles. Nonetheless, for the sake of completeness, we ran the algorithm and instantly realize that the CHI values for the 13 cluster are extremely low indicating that the algorithm has indeed maximized within cluster homogeneity.
+
+Further, although the algorithm regularly selects some of the classic variables used to measure the quality or characteristics of a player, a more interesting result are those variables which it does not deem *explanatory enough* to include. This may challenge the conventional views of many basketball experts. For example, it picks variables relating to steals and usage extremely rarely, indicating that over one season of data, we can not use these variables to discriminate between players.  
+
+```{r MDS clusters,include=FALSE}
+cluster_players <- bic_clust[order(bic_clust$Cluster),]
+knitr::kable(
+ cluster_players ,booktabs = TRUE,longtable=TRUE,
+  caption = "Cluster's Compoisitons.",row.names = FALSE
+)
+
+```
+
+# Conclusion
+
+Considering our objective to redefine the positions in basketball, we feel that we have achieved relative success. We have managed to pin down a certain amount of clusters in the dataset, from novel variables such as the difficulty score and autonomy score. We made use of the MDS algorithm, allowing us to create a fairly truthful representation of the player data on a 3D space. Further, although by no means a finished product, the variable selection algorithm gives a good starting point for a more statistical approach to picking variables used in the clustering of players. It successfully removes duplicate, correlated variables, and further gives insightful views into variables previously thought of as useful, or significant. If we were to extend this work, we would like to work more on the variable selection algorithm, attempting to add some degree of flexibility to the model, possibly by allowing for non-Gaussian shape and full covariance modelling.
+From the perspective of the clustering algorithm, an interesting extension would be more complex clustering algorithms like mixture models, that would be coherent with the assumptions taken in our variable selection algorithm. Additionally, the PbP data offer a vast amount of opportunities to identify interesting relationships between players, but also within teams. Another extension would be to scrutinize the data more extensively to capture patterns that are not yet captured by the current set of variables. 
+
+# References
+
+* Raftery, A.E. and Dean, N. (2006). Variable Selection for Model-Based Clustering. Journal of the American Statistical Association, [online] 101(473), pp.168–178. Available at: https://www.stat.washington.edu/raftery/Research/PDF/dean2006.pdf [Accessed 11 May 2020].
+
+* Zuccolotto, P. and Manisera, M. (n.d.). Basketball Data Science: With Applications In R. 1st ed. [online] Available at: https://www.routledge.com/Basketball-Data-Science-With-Applications-in-R-1st-Edition/Zuccolotto-Manisera/p/book/9781138600799 [Accessed 11 May 2020].
+
+* Pelleg, D. and Moore, A. (2000). X-means: Extending K-means with Efficient Estimation of the Number of Clusters. [online] citeseerx.ist.psu.edu. Available at: http://citeseerx.ist.psu.edu/viewdoc/similar?doi=10.1.1.19.3377&type=cc [Accessed 11 May 2020].
+
+
+# Appendix
+Here we provide the code for some of the most important functions we use, in the order they are used. Please note that this is not the extensive list of used functions, we created other minor functions which can be found at the beginning 'utils' part of the document along with all other functions. Further, the functions below are not evaluated, they are simply pasted below with comments for the readers understanding.
+
+## Data Manipulation Functions
+
+**EventDataManipulation:** Function to manipulate 'play-by-play' or 'event' data into required format for analysis 
+```{r,eval=FALSE}
+EventDataManipulation <- function(EventData){
+  
+  #Remove playoff games
+  data <- subset(EventData,GameType!="playoff") 
+  NameTable=tabNames
+  
+  ##create dummy shot clock, using seconds left clock
+  r=as.numeric(data$SecLeft)
+  r1=c(r[2:nrow(data)],0)
+  r2=r-r1
+  
+  #Remove end of quarter 'follow on' errors, and set columns for Play Length and Period Time
+  r2=ifelse((r2<=-690),720+r2,r2)
+  data$PlayLength=c(0,r2[1:nrow(data)-1])
+  data$PeriodTime=720-data$SecLeft
+  
+  ##merge FT and FG into a unique Shot Type, Shooter and Shot Outcome column
+  data$Shooter<-factor(paste(data$Shooter,data$FreeThrowShooter))
+  data$ShotOutcome<-paste(data$ShotOutcome,data$FreeThrowOutcome)
+  data$ShotType<-paste(data$ShotType,data$FreeThrowNum)
+  
+  ##Remove unneeded cols
+  colsDrop <- c("FreeThrowShooter","FreeThrowOutcome","FreeThrowNum","GameType","Location","Date","Time","TimeoutTeam","EnterGame","LeaveGame","JumpballAwayPlayer","JumpballHomePlayer","JumpballPoss")
+  data=data[,!(names(data) %in% colsDrop)]
+  
+  #Drop empty levels from factors
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  #Name each game
+  URLid=factor(data$URL,labels=c(1:nlevels(data$URL)))
+  data$ID=URLid
+  
+  #clean id
+  data$ID <- readr::parse_number(as.character(data$ID))
+  
+  ##Remove Team Names & White spaces from players 
+  colRemove=c("Shooter","Assister","Blocker","Fouler","Fouled","Rebounder","TurnoverPlayer","TurnoverCauser")
+  for (i in colRemove) {
+    data[,i]=removeTeam(data[,i])
+    data[,i]=whiteSpace(data[,i])
+  }
+  data$ShotOutcome <- whiteSpace(data$ShotOutcome)
+  
+  ##Redo factor levels
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  ## Convert shot type to easier format
+  data$ShotType<-factor(data$ShotType)
+  shots=levels(data$ShotType)
+  shots[str_detect(shots, " of ")] = "FT"
+  shots[str_detect(shots, "2-pt")] = "2P"
+  shots[str_detect(shots, "3-pt")] = "3P"
+  shots[str_detect(shots, "technical")] = "FT"
+  data$ShotType<-factor(data$ShotType,labels=shots)
+  
+  ## Add column to take into account points made from shot
+  r=as.character(data$ShotType)
+  r[str_detect(r, "2P")] = 2
+  r[str_detect(r, "3P")] = 3
+  r[str_detect(r, "FT")] = 1
+  made=as.character(data$ShotOutcome)
+  made[str_detect(made,"make")]=1
+  made[str_detect(made,"miss")]=0
+  points=as.numeric(r)*as.numeric(made)
+  data$points=points
+  
+  ## Add column for away/home play ticker
+  r=as.character(data$AwayPlay)
+  r=ifelse(r!="","A","H")
+  data$PlayTicker=r
+  data$PlayTeam=ifelse(as.character(data$PlayTicker)=="A",as.character(data$AwayTeam),as.character(data$HomeTeam))
+  
+  #Add difficulty probability
+  data<-ProbCalc(data)
+  
+  return(data)
+}
+
+#Function to remove any team name suffix from player name in a column 
+removeTeam <- function(dataColumn){
+  players=levels(dataColumn)
+  players=sapply(players,function(x) str_replace_all(x,"\\s-\\s\\w{3}",""))
+  r <- factor(dataColumn,labels=players)
+  r=as.character(r)
+  return(r)
+}
+```
+
+
+**ProbCalc:** Function to add probability scores to shooting events based on probability scores in book
+```{r, eval=FALSE}
+ProbCalc <- function(data){
+  
+  #Prob vec
+  ProbVec <- c(0.4086
+               ,0.4764
+               ,0.4678
+               ,0.5501
+               ,0.6035
+               ,0.6580
+               ,0.2939
+               ,0.3504
+               ,0.3844
+               ,0.3119
+               ,0.7481
+               ,0.7115
+  )
+  names(ProbVec)<-c(1:12)
+  
+  #Calc score diff for away & home options
+  HomeAway=ifelse(data$PlayTicker=="H",1,-1)
+  scoreDiff=(data$HomeScore-data$AwayScore)*HomeAway
+  
+  #Remove points scored on current shot for score difference calculation
+  data$sc.diff <-scoreDiff-data$points 
+  
+  ## For free throw probability, we need to calculate whether each player scored on their previous free throw
+  #  For each player/team combination, we subset and add ticker for whether the player scored their previous FT
+  
+  for (row in 1:nrow(tabNames)){
+    
+    nm=tabNames$PbP[row]
+    tm=tabNames$Team[row]
+    tabTemp<-subset(data,Shooter==nm & PlayTeam==tm & ShotType=="FT")
+    
+    ## VecPrev is the vector of 1's and 0's indication if the previous free throw was scored
+    if (nrow(tabTemp)==1){
+      
+      #Assumption; all first FT's assume previous FT was made
+      vecPrev=1
+    } else if (nrow(tabTemp)>=2) {
+      vecPrev=ifelse(tabTemp$ShotOutcome=="make",1,0)
+      
+      vecPrev=c(1,vecPrev[1:(length(vecPrev)-1)])
+      
+    }
+    
+    data$prev_ft[(data$Shooter==nm & data$PlayTeam==tm & data$ShotType=="FT")]=vecPrev
+  }
+  
+  #Create only shooting table
+  tabTemp=subset(data,Shooter!="")
+  
+  #create empty vector that we will assign shot difficulty to
+  vecDifficulty=c(1:nrow(tabTemp))
+  
+  #VecOutcome is the vector that gives 1 if shot was made, 0 if missed
+  vecOutcome=ifelse(tabTemp$points>=1,1,0)
+  
+  #Loop through all shots and assign difficulty to each
+  for (row in 1:nrow(tabTemp)){
+    shot_type=as.character(tabTemp$ShotType[row])
+    score_diff=as.numeric(tabTemp$sc.diff[row])
+    prev_ft=as.numeric(tabTemp$prev_ft[row])
+    shot_clock=25-as.numeric(tabTemp$PlayLength[row])
+    quarter_time=as.numeric(tabTemp$SecLeft[row]) 
+    Index=sortIndex(shot_type,prev_ft,shot_clock,quarter_time,score_diff)
+    vecDifficulty[row]=ProbVec[[Index]]
+  } 
+  
+  #difficulty is the shot difficulty, score_diff is the actual score given to each shot, taking into account difficulty
+  data$difficulty[(data$Shooter!="")]=vecDifficulty
+  data$score_diff[(data$Shooter!="")]=vecOutcome-vecDifficulty  
+  
+  return(data)
+  
+}
+```
+
+
+**sortIndex:** Function to sort a shot by a specification into its correct category, specified by index. Assume made in original 24 sec clock due to lack of data
+```{r, eval=FALSE}
+sortIndex <- function(shot_type,prev_ft,shot_clock,quarter_time,score_diff,poss_type=TRUE){
+  
+  
+  if (shot_type=="2P"){
+    if (shot_clock<=2){
+      #time end
+      index=1
+    } else if (shot_clock>2 & shot_clock<=10){
+      #middle end
+      index=2
+      
+    } else if (shot_clock>10 & shot_clock<=17){
+      #Early middle
+      if (poss_type) {
+        #made in original 24 secs
+        if (score_diff<=-15){
+          #if score difference less than -15
+          index=3
+        } else {
+          index=4
+        }
+        
+      } else {
+        #made in second 14-secs restart
+        index=5
+      }
+      
+      
+    } else {
+      #early
+      index=6
+    }
+  } else if (shot_type=="3P"){
+    if (shot_clock<=2){
+      #time end
+      index=7
+    } else {
+      if (quarter_time>=100) {
+        if (shot_clock>2 & shot_clock<=10) {
+          index=8
+        } else {
+          index=9
+        }
+      } else {
+        index=10
+      }
+    }
+    
+  } else {
+    #Free throws
+    
+    if (prev_ft==1) {
+      #made previous free throw
+      index=11
+    } else {
+      #didn't make previous free throw
+      index=12
+    }
+  }
+  
+  return(index)
+  
+}
+```
+
+**PlayerManipulation:** Function to combine the player data and Bio data, and reformulate to a readable and replicable format 
+``` {r, eval=FALSE}
+PlayerManipulation <- function(PlayerData,BioData){
+  
+  # Remove empty rows
+  data<-subset(PlayerData,Player!="")
+  
+  # Convert names of players
+  plyer=as.character(data$Player)
+  
+  # encode special characters
+  Encoding(plyer) <- "UTF-8"
+  
+  # remove ids
+  plyer=str_replace_all(plyer,"\\\\.+","")
+  
+  # Remove special characters
+  plyer=iconv(plyer, from = 'UTF-8', to = 'ASCII//TRANSLIT')
+  
+  # Remove all name additions to ensure we can match with event data
+  plyer=str_replace(plyer," Jr.","")
+  plyer=str_replace(plyer," Sr.","")
+  plyer=str_replace(plyer," III","")
+  plyer=str_replace(plyer," II","")
+  plyer=str_replace(plyer," IV","")
+  
+  data$Player=plyer
+  
+  # Remove Total rows
+  data<-subset(data,Tm!="TOT")
+  
+  ## Drop empty levels from factors
+  fact_vars <- sapply(data, function(x) is.factor(x))
+  data[,fact_vars] <- lapply(data[,fact_vars], function(x) droplevels(x))
+  
+  #Assign transformed player data to variable PlayerDataNew. We will use this to merge later
+  PlayerDataNew=data
+  
+  ## Now manipulate Bio Dataset and merge with Pbox
+  
+  #Remove any empty rows
+  data<-subset(BioData,Player!="")
+  
+  #Convert height from ft and inches to cm  
+  data$height_cm=(as.numeric(data$Height_ft)*30.48)+(as.numeric(data$Height_in)*2.54)
+  
+  #Convert names of players
+  plyer=as.character(data$Player)
+  
+  #encode special characters
+  Encoding(plyer) <- "UTF-8"
+  plyer=iconv(plyer, from = 'UTF-8', to = 'ASCII//TRANSLIT')
+  plyer=str_replace(plyer," Jr.","")
+  plyer=str_replace(plyer," Sr.","")
+  plyer=str_replace(plyer," III","")
+  plyer=str_replace(plyer," II","")
+  plyer=str_replace(plyer," IV","")
+  
+  data$Player=plyer
+  
+  ##Add Col for Pbox Naming Convention to merge
+  data$Pbox_names=tabNames$Pbox[match(data$Player,tabNames$Bio)]
+  
+  #Merge Player Data with Bio data
+  PlayerDataNew=merge(PlayerDataNew,data,by.x = "Player",by.y = "Pbox_names",all.x = TRUE)
+  
+  #Set new column names to ensure usability by any user
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FG."))] <- c("FGp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FG"))] <- c("FGM")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3P"))] <- c("P3M")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3PA"))] <- c("P3A")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X3P."))] <- c("P3p")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2P"))] <- c("P2M")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2PA"))] <- c("P2A")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("X2P."))] <- c("P2p")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("eFG."))] <- c("EFGp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("FT."))] <- c("FTp")
+  colnames(PlayerDataNew)[which(names(PlayerDataNew) == c("MP"))] <- c("MIN")
+  
+  #Remove added teams and names from bio. Unneeded
+  colsDrop <- c("Player.y","Team","Age.y")
+  PlayerDataNew=PlayerDataNew[,!(names(PlayerDataNew) %in% colsDrop)]
+  
+  return(PlayerDataNew)
+}
+```
+
+
+## Variable Creation Functions
+
+**SumTeam:** Function taking PbP data, and summing instances of certain variables over team, then adding them to the respective teams in the Player dataset 
+```{r, eval=FALSE}
+sumTeam <- function(data,PlyrData){
+  
+  ## First assume that player is at home
+  
+  #Create RB marker
+  data$RB = (ifelse (data$ReboundType=="" ,NaN, 
+                     ifelse(data$ReboundType=="defensive",
+                            ifelse(data$PlayTicker=="H", 1,2),
+                            ifelse(data$PlayTicker=="H",3,4))))
+  
+  # 1: Home DRB
+  # 2: Away DRB
+  # 3: Home ORB
+  # 4: Away ORB
+  
+  #Create unique list of teams
+  dfH=data.frame(unique(data$PlayTeam))
+  
+  #Set home team
+  colnames(dfH)[1]<-'HomeTeam'
+  
+  #For each type of rebound, we sum for each team
+  for (r in c(1:4)){
+    d = data %>%
+      dplyr::filter(Rebounder!="",RB==r) %>%
+      dplyr::group_by(HomeTeam) %>%
+      dplyr::summarise(count = n()) 
+    dfH=merge(dfH,d,by.x ="HomeTeam",by.y = "HomeTeam" )
+    colnames(dfH)[r+1]=(as.numeric(r))
+  }
+  
+  #Sort by alphabetical order
+  dfH=dfH[order(dfH$HomeTeam),]
+  
+  #Switch for away teams so we can still collect 1's, 2's etc for total rebounds.
+  
+  #Create RB marker
+  data$RB = (ifelse (data$ReboundType=="" ,NaN, 
+                     ifelse(data$ReboundType=="defensive",
+                            ifelse(data$PlayTicker=="A", 1,2),
+                            ifelse(data$PlayTicker=="A",3,4))))
+  
+  # 1: Away DRB
+  # 2: Home DRB
+  # 3: Away ORB
+  # 4: Home ORB
+  
+  dfA=data.frame(unique(data$PlayTeam))
+  colnames(dfA)[1]<-'AwayTeam'
+  for (r in c(1:4)){
+    d = data %>%
+      dplyr::filter(Rebounder!="",RB==r) %>%
+      dplyr::group_by(AwayTeam) %>%
+      dplyr::summarise(count = n()) 
+    dfA=merge(dfA,d,by.x ="AwayTeam",by.y = "AwayTeam" )
+    colnames(dfA)[r+1]=(as.numeric(r))
+  }
+  dfA=dfA[order(dfA$AwayTeam),]
+  
+  
+  #Collect all rebounds into data frame for each team, then add to Pbox data
+  Rebounds=data.frame(dfH$HomeTeam,(dfH$`1`)+(dfA$`1`),(dfH$`2`)+(dfA$`2`),(dfH$`3`)+(dfA$`3`),(dfH$`4`)+(dfA$`4`))
+  
+  colnames(Rebounds)=c("Team","TDRB","ODRB","TORB","OORB")
+  
+  # creating team variables that are later used for the creation of variables
+  t=PlyrData %>%
+    dplyr::group_by(Tm) %>%
+    dplyr::summarise(TMIN=sum(MIN),TP3M=sum(P3M),TP3A=sum(P3A),TP2M=sum(P2M),TP2A=sum(P2A),
+                     TFT=sum(FT),TFTA=sum(FTA),TFGM=sum(FGM), TFGA = sum(FGA), TTOV = sum(TOV))
+  
+  PlyrData=merge(PlyrData,Rebounds,by.x = 'Tm',by.y = 'Team')
+  
+  PlyrData=merge(PlyrData,t,by.x = 'Tm',by.y = 'Tm')
+  
+  
+  return(PlyrData) 
+}
+
+#Function to run after all manipulation to remove variables unneeded for remainder of analysis
+CleanData <- function(PlayerData){
+  colsRemove=c("ï..Rk","Age.x",'GS','EFGp',"Height_ft","Height_in",'FGPTS','FGPTS_AST','FGPTS_ASTp','ASTPTS','TOTMins','Weighting',"TRB")
+  PlayerDataNew=PlayerData[,!(names(PlayerData) %in% colsRemove)]
+  return(PlayerDataNew)
+}
+
+```
+
+**assistnet:** creates several assist statistics per players in a team and transforms data to an adjacency matrix to potentially outputs a network graph
+```{r, eval=FALSE}
+assistnet <- function(data, Assister="Assister", Shooter="Shooter", points="points", ShotOutcome="ShotOutcome") 
+{
+  # creating a new data frame
+  data = droplevels.data.frame(data)
+  
+  # filter all assisted shots and return a dataframe of Assisters and Shooters
+  assist_player = subset(data, Assister!="", select=c(Assister,Shooter))
+  assist_player = droplevels.data.frame(assist_player)
+  
+  # gives a sorted list of all the assisting players
+  all_ast_plr = sort(unique(unlist(assist_player)))
+  
+  # factorizing all players in order to obtain a square matrix 
+  assist_player$Assister = factor(assist_player$Assister, levels=all_ast_plr)
+  assist_player$Shooter  = factor(assist_player$Shooter,  levels=all_ast_plr)
+  
+  # employ a pxp matrix that serves as an adjacency matrix for the network visualization
+  tbl = as.matrix(table(assist_player, useNA="no"))
+  if (nrow(tbl)!=ncol(tbl)) {
+    stop("The number of players in 'assist' and 'player' variables are not the same.")
+  }
+  
+  # create shooter statistics
+  nodeData1 = data %>%
+    dplyr::group_by(Shooter) %>%
+    
+    # filter out the rows that describes a shot 
+    dplyr::filter(ShotOutcome=="make") %>% 
+    dplyr::summarise(FGM=dplyr::n(),
+                     FGM_AST=sum(Assister!=""),
+                     FGM_ASTp=100*FGM_AST/FGM,
+                     FGPTS=sum(points),
+                     FGPTS_AST=sum(points*(Assister!="")), # 
+                     FGPTS_ASTp=100*FGPTS_AST/FGPTS) %>%
+    as.data.frame()
+  
+  # create assister statistics
+  nodeData2 = data %>%
+    # filter out all shots that have been assisted
+    dplyr::filter(Assister!="") %>%
+    dplyr::group_by(Assister) %>%
+    dplyr::summarise(AST=dplyr::n(), ASTPTS=sum(points)) %>%
+    as.data.frame()
+  
+  # merge together the measures we obtained for shooters and assisters
+  nodeData <- merge(nodeData1, nodeData2, by.x="Shooter", by.y="Assister", all=T)
+  
+  # create a network with directed edges out of the pxp adjacency matrix
+  net <- network::network(tbl, matrix.type="adjacency", directed=TRUE,
+                          ignore.eval=FALSE,  names.eval="N")
+  
+  # aggregate all results that are desired to be outputted
+  out = list(assistTable=tbl, nodeStats=nodeData, assistNet=net)
+  class(out) <- append("assistnet", class(out))
+  return(out)
+}
+
+```
+
+**assistStat:** creates the same assist statistics as assistnet, but does so for every player and outputs a dataframe that shows these statistics for every player in each team he played in 
+```{r eval=FALSE}
+# AssistStats for every player 
+
+assistStat = function(df, PlayTeam="PlayTeam", Assister="Assister", Shooter="Shooter", points="points", ShotOutcome="ShotOutcome"){
+  
+  # creating a new data frame
+  final = data.frame()
+  
+  # loop through all teams to obtain these statistics for all players 
+  for (team in unique(df[[PlayTeam]])){
+    
+    data = subset(df, PlayTeam==team)
+    data = droplevels.data.frame(data)
+    
+    # create shooter statistics
+    nodeData1 <- data %>%
+      dplyr::group_by(Shooter) %>%
+      
+      # filter out the rows that describes a shot 
+      dplyr::filter(ShotOutcome=="make") %>% 
+      dplyr::summarise(FGM=dplyr::n(),
+                       FGM_AST=sum(Assister!=""),
+                       FGM_ASTp=100*FGM_AST/FGM,
+                       FGPTS=sum(points),
+                       FGPTS_AST=sum(points*(Assister!="")), # 
+                       FGPTS_ASTp=100*FGPTS_AST/FGPTS) %>%
+      as.data.frame()
+
+    
+    # create assister statistics
+    nodeData2 <- data %>%
+      # filter out all shots that have been assisted
+      dplyr::filter(Assister!="") %>%
+      dplyr::group_by(Assister) %>%
+      dplyr::summarise(AST=dplyr::n(), ASTPTS=sum(points)) %>%
+      as.data.frame()
+    
+    # merge together the measures we obtained for shooters and assisters
+    nodeData = merge(nodeData1, nodeData2, by.x="Shooter", by.y="Assister")
+    
+    # additionally assign the team to the newly created player statistics to make the rows identifiable, since one player can be in more than one team 
+    nodeData$Team = team
+    
+    # add the statistics for all players within one team to the final data frame 
+    final    = rbind(final, nodeData) }
+  
+  # after looping through every team, the output will be a list of all the players and the teams they played in with their respective statistics
+  return(final)
+}
+
+```
+
+**period_densityplot:** Adapted the density plot function from book for our use; only need to show analysis by period time, so have removed the rest of the code as it is not used here
+```{r, eval=FALSE}
+period_densityplot <- function(data, shot.type="field", thresholds=NULL, best.scorer=FALSE,
+                               period.length=12, bw=NULL, title=NULL) {
+  
+  if (is.null(bw)) {
+    bw <- "nrd0"
+  }
+  
+  #Only interested in Field Goals
+  mat <- subset(data, ShotType=="2P" | ShotType=="3P")
+  mat <- droplev_by_col(mat)
+  
+  var="PeriodTime"
+  x <- mat[,var]
+  #Give range for period times
+  xrng <- c(0, period.length*60)
+  
+  #Return density structure, giving smooth curve approximation to shots by players at certain time periods 
+  den <- stats::density(x, bw=bw, from=xrng[1], to=xrng[2])
+  den <- as.data.frame(den[c("x", "y")])
+  
+  
+  #Give thresholds for the different percentages
+  if (is.null(thresholds)) {
+    thr <- period.length*60*c(1/3,2/3)
+  } else {
+    thr <- thresholds
+  }
+  
+  
+  p <- plot_shotdensity(mat, den, var=var, thr=thr, xrng=xrng, ntks=10, title=title,
+                        xadj=c(0,0,period.length*60), yadj=c(2,2,2,10), best.scorer=best.scorer, xlab="Period time")
+  
+  p <- p + theme_bw()
+  
+  return(p)
+}
+```
+
+
+**plot_shotdensity:** Function to build the shot density plot, adapted from book
+```{r, eval=FALSE}
+plot_shotdensity <- function(mat, den, var, thr, xrng, ntks, xadj, yadj, title=NULL, best.scorer=FALSE, xlab=NULL) {
+  
+  droplev_by_col <- function(data) {
+    idx <- sapply(data, class)=="factor"
+    data[, idx] <- lapply(data[, idx], droplevels)
+    return(data)
+  }
+  
+  y <- NULL
+  x <- mat[, var]
+  n <- nrow(mat)
+  m1 <- droplev_by_col(mat[x <= thr[1], ])
+  n1 <- nrow(m1)
+  p1 <- round(n1/n*100,0)
+  m1p <- round(sum(m1$ShotOutcome=="make")/n1*100,0)
+  m2 <- droplev_by_col(mat[x <= thr[2] & x > thr[1], ])
+  n2 <- nrow(m2)
+  p2 <- round(n2/n*100,0)
+  m2p <- round(sum(m2$ShotOutcome=="make")/n2*100,0)
+  m3 <- droplev_by_col(mat[x > thr[2], ])
+  n3 <- n - (n1+n2)
+  p3 <- 100-(p1+p2)
+  m3p <- round(sum(m3$ShotOutcome=="make")/n3*100,0)
+  
+  x1 <- (thr[1] + xadj[1])/2
+  x2 <- (thr[1] + thr[2] + xadj[2])/2
+  x3 <- (thr[2] + xadj[3])/2
+  
+  y1 <- mean(den$y[den$x<(x1 + yadj[4]) & den$x>(x1 - yadj[4])])/yadj[1]
+  y2 <- mean(den$y[den$x<(x2 + yadj[4]) & den$x>(x2 - yadj[4])])/yadj[2]
+  y3 <- mean(den$y[den$x<(x3 + yadj[4]) & den$x>(x3 - yadj[4])])/yadj[3]
+  
+  p <- ggplot(den,aes(x,y))+
+    geom_line(col='gray',lwd=2) +
+    geom_ribbon(data=subset(den,x<=thr[1]),aes(x=x, ymax=y, ymin=0), fill="blue", alpha=0.3) +
+    geom_ribbon(data=subset(den,x<=thr[2] & x>thr[1]),aes(x=x, ymax=y, ymin=0), fill="blue", alpha=0.5) +
+    geom_ribbon(data=subset(den,x>thr[2]),aes(x=x, ymax=y, ymin=0), fill="red", alpha=0.3) +
+    annotate("text", label = paste(as.character(p1),"%",sep=""), x = x1, y = y1, size = 5, colour = "blue") +
+    annotate("text", label = as.character(n1), x = x1, y = y1, size = 4, colour = "blue",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m1p),"% made)",sep=""), x = x1, y = y1, size = 4, colour = "blue",vjust = 4) +
+    annotate("text", label = paste(as.character(p2),"%",sep=""), x = x2, y = y2, size = 5, colour = "blue") +
+    annotate("text", label = as.character(n2), x = x2, y = y2, size = 4, colour = "blue",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m2p),"% made)",sep=""), x = x2, y = y2, size = 4, colour = "blue",vjust = 4) +
+    annotate("text", label = paste(as.character(p3),"%",sep=""), x = x3, y = y3, size = 5, colour = "red") +
+    annotate("text", label = as.character(n3), x = x3, y = y3, size = 4, colour = "red",vjust = 2) +
+    annotate("text", label = paste("(",as.character(m3p),"% made)",sep=""), x = x3, y = y3, size = 4, colour = "red",vjust = 4) +
+    labs(title = title) +
+    scale_x_continuous(name=xlab, limits=c(xrng[1], xrng[2]), breaks=seq(xrng[1],xrng[2],length.out=ntks),
+                       labels=seq(xrng[1],xrng[2],length.out=ntks)) +
+    scale_y_continuous(name="Frequency of shots", limits=c(0, NA),labels=NULL)
+  
+  return(p)
+}
+
+```
+
+## MDS & visualisation tools
+
+**MDS:** function to apply an MDS algorithm to reduce data into a k-dimensional metric space
+```{r, eval=FALSE}
+MDS <- function(data, k=2, std=TRUE ) {
+  # data must be one of the below datatypes
+  if (!is.matrix(data) & !is.data.frame(data) & (!inherits(data, "dist"))) {
+    stop("'data' must be a matrix, a data frame, or a distance matrix")
+  }
+  
+  # we need to work with a distance matrix, that is why we first standardize (if choosen to) and then transform non-distance matrix to a distance matrix
+  if (!inherits(data, "dist")) {
+    if (std) {
+      data_for_dist <- scale(data)
+    } else {
+      data_for_dist <- data
+    }
+    dist.mat <- dist(data_for_dist)
+  } else {
+    dist.mat <- data
+  }
+  
+  # we apply the non-metric MDS approach here and configure the starting configuration as the result of the metric MDS calculation (cmdscale())
+  # k is the number of dimensions we want to reduce to 
+  # the outout typically comes with the k-dimensional coordinates for every observation in the dataset and the stress index
+  out <- MASS::isoMDS(dist.mat, k, y=cmdscale(dist.mat, k), maxit=100, trace=FALSE)
+  
+  # here we add additional information to the output: 
+  # the original data
+  out[["data"]] <- data
+  # the created distance matrix
+  out[["dist"]] <- dist.mat
+  # if the values are standarized
+  out[["std"]] <- std
+  
+  class(out) <- append("MDSmap", class(out))
+  return(out)
+}
+```
+
+
+**twod:** 2-dimensional plotting function with ggplot
+```{r, eval=FALSE}
+twod = function(data, data.var, w.var){
+  # creating a subsetted dataset with the axis of the plot
+  df <- data[, data.var]
+  names(df) <- c("x","y")
+  
+  # creating another subset with the variable that should serve as the color scale 
+  w <- data[, w.var]
+  # depending on the datatype of the variable, the color scale will be discrete(for characters or factors) or continous(for numeric values)
+  if (is.character(w)) {
+    w = factor(w)
+    df$w = w }
+  else if (is.factor(w) | is.numeric(w)) {
+    df$w = w}
+  
+  # plotting the values
+  p <- ggplot(data=df, aes(x=x, y=y, color=w))
+  
+  # adding the markers 
+  p <- p + geom_point()
+  
+  # adding either a discrete or continous color scale 
+  if (is.factor(w)) {
+    p = p + scale_color_manual(name=w.var, values=topo.colors(length(unique(w))))}
+  else if (!is.factor(w)){
+    p = p + scale_color_gradientn(name=w.var, colors=topo.colors(length(unique(w))))}
+  
+  # adjusting labels in the plot
+  p <- p + labs(title="", x="", y="") + theme_light()
+  return(p)
+}
+
+```
+
+
+**threed:** 3-dimensional plotting function with ggplot
+```{r, eval=FALSE}
+threed = function(data, data.var, w.var){
+  
+  # creating a subsetted dataset with the axis of the plot
+  df <- data[, data.var]
+  names(df) <- c("x","y","z")
+  
+  # creating another subset with the variable that should serve as the color scale 
+  w <- data[, w.var]
+  
+  # depending on the datatype of the variable, the color scale will be discrete(for characters or factors) or continous(for numeric values)
+  if (is.character(w)) {
+    w = factor(w)
+    df$w = w }
+  else if (is.factor(w) | is.numeric(w)) {
+    df$w = w}
+  
+  # plotting the values 
+  p = ggplot(df, aes(x=x,y=y,z=z, color=w)) +
+    axes_3D() +   # adding 3-d axes
+    stat_3D() +   # adding 3-d markers
+    theme_light() # choosing the style of the plot
+  
+  # adding either a discrete or continous color scale 
+  if (is.factor(w)) {
+    p = p + scale_color_manual(name=w.var, values=topo.colors(length(unique(w))))}
+  else if (!is.factor(w)){
+    p = p + scale_color_gradientn(name=w.var, colors=topo.colors(length(unique(w))))}
+
+  return(p)
+}
+
+```
+
+
+## Variable Selection Algorithms and Functions
+
+**VariableSelect:** Implements the greedy search algorithm mentioned by Raftery and Dean (2006), using BIC as the goodness-of-fit measure, and assumes multivariate gaussian mixture distribution for the clusters 
+```{r,eval=FALSE}
+VariableSelect <- function(PlayerData,minK=2,k,algorithm="Hartigan-Wong",nStarts=1,printFull=FALSE){
+  
+  ##### VariableSelect ####################################
+  
+  #Used RAFTERY and DEAN (2006)
+  
+  ##### Input #####
+  # PlayerData = Pbox season data on which to cluster
+  # k = Number of clusters
+  
+  ##### Output #####
+  # VarCluster = Variables to cluster on
+  
+    
+  PlayerData = scale(PlayerData)
+  PlayerData[is.na(PlayerData)]=0
+  #Give data frame of numeric/integer values, scale data firstly
+  
+  #Extract PlayerData into matrix form
+  matData=as.matrix.data.frame(PlayerData)
+  
+  varN=ncol(PlayerData)
+  var_exc=c(1:varN)
+  
+  maxBICY1=-10000000
+  #1/ Find first variable to select as one with highest univariate clustering potential
+  for (i in var_exc){
+    for (j in c(minK:k)){
+      kmeans_i=kmeans(matData[,i],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+      bic_i=bic_kmeans(kmeans_i,matData[,i])
+      if (maxBICY1<bic_i){
+        maxBICY1=bic_i
+        maxVar=i
+        maxClust=j
+      }  
+    }
+  }
+  
+  if (printFull) {
+  print("Step 1:")
+  print(paste("BIC = ",maxBICY1,sep = ""))
+  print(paste("Optimal no of clusters = ",maxClust))
+  print(paste("Best univariate variable = ", colnames(PlayerData)[maxVar]))
+  }
+  
+  #Create list of variables 
+  var_inc=c(maxVar)
+  var_exc=var_exc[!(var_exc==maxVar)]
+  
+  #2/ Find second variable, take best bivariate clustering potential with first variable
+  maxBICdiff=-10000000
+  for (i in var_exc){
+    for (j in c(minK:k)){
+      
+      #Calc regression BIC
+      y1=matData[,c(var_inc)]
+      y2=matData[,i]
+      ft=lm(y2~y1)
+      rss=sum((ft$residuals)^2)  
+      n=dim(matData)[1]
+      bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+      
+      kmeans_i=kmeans(matData[,c(var_inc,i)],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+      bic_clust=bic_kmeans(kmeans_i,matData[,c(var_inc,i)])
+      
+      bic_notClust=bic_reg+maxBICY1  
+      
+      bic_diff=bic_clust-bic_notClust
+      
+      if (maxBICdiff<bic_diff){
+        maxBICdiff=bic_diff
+        maxBIC=bic_clust
+        maxVar=i
+        maxClust=j
+      } 
+    }
+  }
+  
+  #Create list of variables 
+  var_inc=c(var_inc,maxVar)
+  var_exc=var_exc[!(var_exc==maxVar)]
+  
+  #Set new model BIC
+  maxBICY1=maxBIC
+  
+  if (printFull) {
+  print("")
+  print("Step 2:")
+  print(paste("BIC = ",maxBICY1,sep = ""))
+  print(paste("Optimal no of clusters (bivariate) = ",maxClust))
+  print(paste("Best Bivariate variables = ", colnames(PlayerData)[var_inc[1]]," & ",colnames(PlayerData)[var_inc[2]]))
+  }
+  #Run algorithm
+  # while true
+  done=FALSE
+  
+  while (!done){
+    
+    #3/ Find variable with most multivariate clustering potential with those already selected
+    maxBICdiff=-10000000
+    for (i in var_exc){
+      for (j in c(minK:k)){
+        
+        #Calc regression BIC
+        y1=matData[,c(var_inc)]
+        y2=matData[,i]
+        ft=lm(y2~y1)
+        rss=sum((ft$residuals)^2)  
+        n=dim(matData)[1]
+        bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+        
+        kmeans_i=kmeans(matData[,c(var_inc,i)],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+        bic_clust=bic_kmeans(kmeans_i,matData[,c(var_inc,i)])
+        
+        bic_notClust=bic_reg+maxBICY1  
+        
+        bic_diff=bic_clust-bic_notClust
+        
+        if (maxBICdiff<bic_diff){
+          maxBICdiff=bic_diff
+          maxBIC=bic_clust
+          maxVar=i
+          maxClust=j
+        } 
+      }
+    }
+    
+    #If diff in BIC vals is positive, add variable maxVar
+    if ((maxBICdiff)>0){
+      var_inc=c(var_inc,maxVar)
+      var_exc=var_exc[!(var_exc==maxVar)] 
+      #update current Y1 bic
+      maxBICY1=maxBIC
+    } else {
+      done=TRUE
+      
+    }
+    
+    if (printFull) {
+    print("")
+    print("Step 3:")
+    print(paste("BIC = ",maxBICY1,sep = ""))
+    print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+    print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+    }
+    #4/ Find variable for removal from currently selected variables by finding variable with weakest evidence for clustering inclusion
+    #   and remove if evidence for not clustering is higher than clustering
+    
+    minBICdiff=10000000
+    for (i in var_inc){
+      for (j in c(minK:k)){
+        tempCol=var_inc[!(var_inc==i)]
+        
+        #Calc regression BIC
+        y1=matData[,tempCol]
+        y2=matData[,i]
+        ft=lm(y2~y1)
+        rss=sum((ft$residuals)^2)  
+        n=dim(matData)[1]
+        bic_reg=-(n*log(2*pi))-(n*log(rss/n))-n-((length(var_inc)+2)*log(n))
+        
+        kmeans_i=kmeans(matData[,tempCol],j,iter.max = 100, algorithm = algorithm,nstart = nStarts)
+        bic_clust=bic_kmeans(kmeans_i,matData[,tempCol])
+        
+        bic_notClust=bic_reg+bic_clust
+        
+        bic_diff=maxBICY1-bic_notClust
+        
+        if (minBICdiff>bic_diff){
+          minBICdiff=bic_diff
+          minBIC=bic_clust
+          minVar=i
+          minClust=j
+        } 
+      }
+    }
+    
+    #If diff in BIC vals is ngative, remove minVar
+    if ((minBICdiff)<=0){
+      var_inc=var_inc[!(var_inc==minVar)]
+      var_exc=c(var_exc,minVar) 
+      var_exc=sort(var_exc)
+      done=FALSE
+      
+      if (printFull) {
+      print("")
+      print("Step 4:")
+      print(paste("BIC = ",maxBICY1,sep = ""))
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print(paste("remove: ",colnames(PlayerData)[minVar]))
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+      }
+      
+    } else {
+      
+      if (printFull) {
+      print("")
+      print("Step 4:")
+      print(paste("BIC = ",maxBICY1,sep = ""))
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print("Do not remove variable")
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+      }
+    }
+    
+  }
+  
+  if(!printFull){
+      print(paste("Optimal no of clusters (multivariate) = ",maxClust))
+      print(paste("var ",c(1:length(var_inc)), " = ",colnames(PlayerData)[var_inc]))
+  }
+  return(var_inc)
+}
+
+```
+
+
+**bic_kmeans:** Function to estimate the BIC metric, for output of k-means algorithm - Estimates clusters to have gaussian mixture distribution, in order to calculate likelihood
+```{r, eval=FALSE}
+bic_kmeans <- function(kmeans,x){
+
+  #  Parameters:
+  ##########################################
+  # kmeans:  data frame with output of kmeans algorithm
+  
+  # X     :  Data points
+  ##########################################
+  # assign centers and labels
+  centers = kmeans$centers
+  labels  = kmeans$cluster
+  #number of clusters
+  K = as.numeric(dim(centers)[1])
+  # size of the clusters
+  Rn = kmeans$size
+  #R = number of data points, M=number of variables (dim)
+  R = as.numeric(dim(as.matrix(x))[1])
+  M = as.numeric(dim(as.matrix(x))[2])
+  
+  #Compute Variance
+  cl_var = (1.0 / ((R - K)*M)) * (kmeans$tot.withinss)
+  
+  const_term = K * log(R)*(M+1)
+  
+  ll=sum(Rn*log(Rn))-R*log(R)-(R*M*0.5*log(2*pi*cl_var))-(0.5*M*(R-K))
+  
+  BIC = 2*ll - const_term
+  
+  return(BIC)
+  
+}
+
+```
+
+
+
+
