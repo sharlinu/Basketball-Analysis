@@ -1,4 +1,4 @@
-# Basketball-Analysis
+# Redefining the five roles in Basketball
 
 The goal of this project is to redefine player roles of basketball players using clustering - similarly as Alagappan (2012), a paper which is one of the first quantative analysis attempting to characterize the playing roles of basketball players.
 
